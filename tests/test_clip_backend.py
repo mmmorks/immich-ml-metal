@@ -186,6 +186,39 @@ def test_mlx_embeddings_map_repos_have_patch_token():
         assert pat.search(repo), f"{name} -> {repo!r} lacks a patchNN-NNN token"
 
 
+# --- SigLIP2 tokenizer source resolution (ml-qax) ----------------------------
+
+
+def test_tokenizer_json_from_local_dir(tmp_path):
+    """A local cache/override dir supplies its own copied-in tokenizer.json."""
+    tok = tmp_path / "tokenizer.json"
+    tok.write_text("{}")
+    assert clip_module._resolve_siglip2_tokenizer_json(str(tmp_path)) == str(tok)
+
+
+def test_tokenizer_json_from_override_repo_not_default(monkeypatch):
+    """A non-dir override (custom/quantized HF repo-id) must fetch tokenizer.json
+    from THAT repo, not the default SigLIP2 repo — else weights and tokenizer
+    mismatch and query embeddings silently diverge from the index (ml-qax)."""
+    calls = []
+
+    def fake_download(repo_id, filename, *args, **kwargs):
+        calls.append((repo_id, filename))
+        return f"/fake/{repo_id}/{filename}"
+
+    import huggingface_hub
+
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", fake_download)
+
+    override_repo = "someuser/siglip2-so400m-patch16-384-custom"
+    result = clip_module._resolve_siglip2_tokenizer_json(override_repo)
+
+    assert calls == [(override_repo, "tokenizer.json")], (
+        f"tokenizer must come from the override repo, got {calls!r}"
+    )
+    assert result == f"/fake/{override_repo}/tokenizer.json"
+
+
 def test_siglip2_routes_to_native_backend_not_mlx_clip():
     """SigLIP2 names handled natively must be None in MODEL_MAP so they never
     route to the mlx_clip path; they're dispatched via MLX_EMBEDDINGS_MAP."""

@@ -249,6 +249,26 @@ def ensure_siglip2_source(repo_id: str) -> tuple[str, str]:
     return repo_id, "hf"
 
 
+def _resolve_siglip2_tokenizer_json(path_or_repo: str) -> str:
+    """Path to the tokenizer.json that matches the SigLIP2 weights at ``path_or_repo``.
+
+    The tokenizer MUST come from the SAME source as the weights, or query
+    embeddings silently diverge from the index (ml-qax). ``path_or_repo`` is
+    whatever ``ensure_siglip2_source`` resolved — a local dir (cache or local
+    override) or an HF repo id (a non-dir override, or the default bf16 repo).
+
+    * Local dir: read the copied-in ``tokenizer.json`` (convert() / snapshot
+      writes it alongside the weights).
+    * Non-dir: download ``tokenizer.json`` from *that* repo id — never a
+      hardcoded default, so a custom/quantized override gets its own tokenizer.
+    """
+    if os.path.isdir(path_or_repo):
+        return os.path.join(path_or_repo, "tokenizer.json")
+    from huggingface_hub import hf_hub_download
+
+    return hf_hub_download(path_or_repo, "tokenizer.json")
+
+
 # open_clip model name mappings for fallback
 OPENCLIP_MAP = {
     "ViT-B-32__openai": ("ViT-B-32-quickgelu", "openai"),
@@ -385,13 +405,7 @@ class MLXClip:
         # (override) or the HF repo snapshot.
         from src.models.immich_preprocess import SiglipTextTokenizer
 
-        if os.path.isdir(path_or_repo):
-            # Local override or cache dir — convert() copies tokenizer.json in.
-            tokenizer_json = os.path.join(path_or_repo, "tokenizer.json")
-        else:
-            from huggingface_hub import hf_hub_download
-
-            tokenizer_json = hf_hub_download(repo, "tokenizer.json")
+        tokenizer_json = _resolve_siglip2_tokenizer_json(path_or_repo)
         self._siglip_tokenizer = SiglipTextTokenizer(tokenizer_json)
 
         self._use_mlx_embeddings = True
