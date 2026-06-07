@@ -189,6 +189,33 @@ arch for every OpenAI port; a plain (standard-gelu) reference false-FAILs a corr
 mlx_clip at ~0.985 (the quickgelu-vs-gelu gap). Re-check any model with
 `.venv/bin/python scripts/clip_parity.py --model <name>`.
 
+#### CLIP speed (mlx_clip path)
+
+Parity proves mlx_clip is *correct*; a companion benchmark,
+`scripts/clip_benchmark.py`, proves it is also *faster* than the path it
+replaced. It times warm single-item encodes — the production serving pattern,
+one image / one query at a time — for the mlx_clip Metal path against the same
+model's **upstream ONNX export** (`immich-app/<model>`, the exact `visual` /
+`textual` `model.onnx` the standard Immich ML server loads) under onnxruntime.
+`CPUExecutionProvider` is the honest apples-to-apples baseline — it is what
+Immich's Docker image actually runs on Apple Silicon (no CUDA) — and
+`CoreMLExecutionProvider` is reported too as the Mac-native accelerated ONNX
+point.
+
+mlx_clip (Metal) is **materially faster than upstream ONNX-CPU** for both OpenAI
+ports measured, image and text:
+
+| path  | `ViT-B-16__openai` / `ViT-L-14__openai` vs ONNX-CPU |
+|-------|-----------------------------------------------------|
+| image | **2.8–4.3× faster**                                 |
+| text  | **3.5–4.1× faster**                                 |
+
+So mlx_clip wins on speed as well as parity — there is no case for a different or
+hand-rolled MLX CLIP backend (`mlx_clip` already *is* the MLX implementation).
+Re-run with `.venv/bin/python scripts/clip_benchmark.py` (needs
+`pip install open-clip-torch` for the ONNX text tokenizer; the ONNX exports
+download once, ~0.6 GB B-16 / ~1.7 GB L-14).
+
 ### Native SigLIP2 backend
 
 `ViT-SO400M-16-SigLIP2-384__webli` runs natively on the Metal GPU through
