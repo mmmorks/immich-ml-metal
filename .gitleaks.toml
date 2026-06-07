@@ -1,0 +1,8 @@
+title = "immich-ml-metal gitleaks config"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Test fixtures use synthetic secrets/passwords, not real credentials"
+paths = ['''tests/.*\.py''']

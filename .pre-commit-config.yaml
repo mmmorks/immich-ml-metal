@@ -1,9 +1,13 @@
 # Pre-commit gate for the ml submodule (immich-ml-metal).
 # Install once with: pre-commit install
 #
-# Only ruff (lint + format) runs here: the test suite and pyright both need the
-# heavy native venv (mlx, insightface, cv2, onnxruntime) which isn't always
-# present, and mlx is Apple-Silicon-only. Run those manually:
+# ruff (lint + format) + a gitleaks secret scan run here. gitleaks runs at
+# commit time on purpose: a secret caught only in CI is already on the remote.
+# Requires the gitleaks binary on PATH (brew install gitleaks).
+#
+# The test suite and pyright are NOT run here: both need the heavy native venv
+# (mlx, insightface, cv2, onnxruntime) which isn't always present, and mlx is
+# Apple-Silicon-only. Run those manually:
 #   .venv/bin/python -m pytest        # tests
 #   pyright                           # type check (needs the venv on PYTHONPATH)
 repos:
@@ -15,3 +19,11 @@ repos:
         args: [--fix]
       - id: ruff-format
         name: ruff (format)
+
+  - repo: local
+    hooks:
+      - id: gitleaks
+        name: gitleaks (scan staged changes for secrets)
+        entry: gitleaks git --staged --redact --no-banner
+        language: system
+        pass_filenames: false
