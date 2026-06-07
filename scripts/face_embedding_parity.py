@@ -309,6 +309,31 @@ def embed(image_bytes: bytes, kps: list[list[float]]) -> np.ndarray:
     return get_face_embedding(image_bytes, kps, model_name=UPSTREAM_PACK)
 
 
+def upstream_embeddings(samples: list[Sample], det_size: int = 640) -> list[dict]:
+    """Run the upstream (SCRFD detect → ArcFace embed) ONNX pipeline on each
+    sample. Returns one record per detected face:
+        {"img_id": int, "name": str, "label": str|None,
+         "bbox": (x1,y1,x2,y2), "embedding": np.ndarray[512] (L2-normalized)}
+    This is exactly the golden the face gate compares the MLX/Apple-Vision fork
+    pipeline against.
+    """
+    app = make_upstream_detector(det_size)
+    records: list[dict] = []
+    for img_id, s in enumerate(samples):
+        img_bgr = cv2.imdecode(np.frombuffer(s.data, np.uint8), cv2.IMREAD_COLOR)
+        for f in upstream_faces(app, img_bgr):
+            emb = embed(s.data, f["kps"])
+            n = float(np.linalg.norm(emb))
+            records.append({
+                "img_id": img_id,
+                "name": s.name,
+                "label": s.label,
+                "bbox": tuple(float(v) for v in f["bbox"]),
+                "embedding": (emb / n if n > 0 else emb).astype(np.float32),
+            })
+    return records
+
+
 # --------------------------------------------------------------------------- #
 # Top-1 identity retrieval
 # --------------------------------------------------------------------------- #
