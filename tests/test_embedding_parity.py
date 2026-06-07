@@ -11,6 +11,7 @@ preserve-vs-reindex gate could pass on weak synthetic data. These cover:
 The script is loaded by path (scripts/ is not a package), so these run without a
 heavyweight backend import.
 """
+
 import importlib.util
 import math
 from pathlib import Path
@@ -24,6 +25,7 @@ _SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "embedding_parity.py
 
 def _load_module():
     spec = importlib.util.spec_from_file_location("embedding_parity", _SCRIPT)
+    assert spec is not None and spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -35,6 +37,7 @@ mod = _load_module()
 def _raise(exc):
     def _f(*_a, **_k):
         raise exc
+
     return _f
 
 

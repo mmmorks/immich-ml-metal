@@ -1,15 +1,13 @@
 """Configuration settings for immich-ml-metal."""
 
+import logging
 import os
 from dataclasses import dataclass
 from typing import Literal
-import logging
 
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 
-_VALID_LOG_LEVELS: frozenset[str] = frozenset(
-    ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
-)
+_VALID_LOG_LEVELS: frozenset[str] = frozenset(["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"])
 
 
 # Captures an invalid ML_LOG_LEVEL so configure_logging() can warn about it
@@ -38,47 +36,47 @@ def _normalize_log_level(raw: str) -> LogLevel:
 @dataclass
 class Settings:
     """Application settings with sensible defaults."""
-    
+
     # Server settings
     host: str = "0.0.0.0"
     port: int = 3003
 
     # CLIP settings - using smaller model for low-memory systems
     clip_model: str = "ViT-B-32__openai"
-    
+
     # Face recognition settings
     # buffalo_l is Immich's default, provides best accuracy
     # buffalo_s and buffalo_m are smaller alternatives
     face_model: str = "buffalo_l"
-    
+
     # Face detection threshold - Immich default is 0.7
     # Lower values = more faces detected (more false positives)
     # Higher values = fewer faces detected (more false negatives)
     face_min_score: float = 0.7
-    
+
     # OCR settings
     # Detection/recognition minScore thresholds are supplied per-request by
     # Immich (task_config["detection"]/["recognition"] options); they are not
     # configured here. Only language correction is a local setting.
     ocr_use_language_correction: bool = True  # Disable for technical text/codes
-    
+
     # Performance settings
     use_coreml: bool = True
     use_ane: bool = True  # Apple Neural Engine
     max_concurrent_requests: int = 4  # Queued requests before backpressure
-    
+
     # Resource limits
     max_image_size: int = 50 * 1024 * 1024  # 50MB max upload
     request_timeout: int = 120  # max seconds a request waits for a free slot (queue backpressure); does not cap in-flight inference
-    
+
     # Logging settings
     log_level: LogLevel = "INFO"
     log_requests: bool = True  # Log individual requests (disable for high volume)
-    
+
     # Debug mode - when True, expose error details in responses
     # Should be False when service is network-accessible
     debug_mode: bool = False
-    
+
     @classmethod
     def from_env(cls) -> "Settings":
         """Load settings from environment variables."""
@@ -98,22 +96,17 @@ class Settings:
             log_requests=os.getenv("ML_LOG_REQUESTS", "true").lower() == "true",
             debug_mode=os.getenv("ML_DEBUG_MODE", "false").lower() == "true",
         )
-    
+
     def configure_logging(self):
         """Configure logging based on settings."""
         level = getattr(logging, self.log_level, logging.INFO)
         if not isinstance(level, int):
             level = logging.INFO
-        logging.basicConfig(
-            level=level,
-            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-        )
+        logging.basicConfig(level=level, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
         # Deferred from _normalize_log_level (runs at import, pre-basicConfig)
         # so the warning prints through the formatter configured just above.
         if _invalid_log_level is not None:
-            logging.getLogger(__name__).warning(
-                "Invalid ML_LOG_LEVEL %r; fell back to INFO", _invalid_log_level
-            )
+            logging.getLogger(__name__).warning("Invalid ML_LOG_LEVEL %r; fell back to INFO", _invalid_log_level)
 
 
 # Global settings instance

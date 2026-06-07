@@ -111,7 +111,7 @@ def _download_one(url: str, attempts: int = 3, base_delay: float = 1.0) -> bytes
             req = urllib.request.Request(url, headers={"User-Agent": "parity-harness"})
             with urllib.request.urlopen(req, timeout=30) as resp:
                 return resp.read()
-        except Exception as e:  # noqa: BLE001 — network is the only failure mode here
+        except Exception as e:
             last_exc = e
             if attempt < attempts:
                 delay = base_delay * attempt
@@ -138,9 +138,7 @@ def load_images(
     """
     if images_dir is not None:
         exts = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
-        files = sorted(
-            p for p in images_dir.iterdir() if p.suffix.lower() in exts
-        )[:num]
+        files = sorted(p for p in images_dir.iterdir() if p.suffix.lower() in exts)[:num]
         if not files:
             raise SystemExit(f"No images found in {images_dir}")
         out = []
@@ -164,7 +162,7 @@ def load_images(
             url = f"https://picsum.photos/seed/{seed}/640/480"
             try:
                 fpath.write_bytes(_download_one(url))
-            except Exception as e:  # noqa: BLE001 — offline / service down
+            except Exception as e:
                 if not allow_synthetic:
                     raise SystemExit(
                         f"[images] sample download failed after retries ({e!r}). "
@@ -172,7 +170,7 @@ def load_images(
                         "network access, pass --images DIR with local photos, or pass "
                         "--allow-synthetic to force the (weaker) synthetic fallback "
                         "(which marks the run INCONCLUSIVE)."
-                    )
+                    ) from e
                 print("!" * 78)
                 print(f"[images] sample download failed after retries ({e!r})")
                 print("[images] --allow-synthetic set: falling back to SYNTHETIC images.")
@@ -212,10 +210,7 @@ def embed_mlx(images: list[tuple[str, bytes]], queries: list[str]) -> tuple[np.n
 
     model = get_clip_model(IMMICH_MODEL)
     if not getattr(model, "_use_mlx_embeddings", False):
-        raise SystemExit(
-            "MLX SigLIP2 backend did not load (fell back to open_clip). "
-            "Check that mlx-embeddings is installed and the model downloaded."
-        )
+        raise SystemExit("MLX SigLIP2 backend did not load (fell back to open_clip). Check that mlx-embeddings is installed and the model downloaded.")
     img = np.stack([model.encode_image(b) for _, b in images])
     txt = np.stack([model.encode_text(q) for q in queries])
     model.unload()
@@ -223,9 +218,7 @@ def embed_mlx(images: list[tuple[str, bytes]], queries: list[str]) -> tuple[np.n
     return img, txt
 
 
-def embed_openclip(
-    images: list[tuple[str, bytes]], queries: list[str], device: str
-) -> tuple[np.ndarray, np.ndarray]:
+def embed_openclip(images: list[tuple[str, bytes]], queries: list[str], device: str) -> tuple[np.ndarray, np.ndarray]:
     """Diagnostic: open_clip webli with its own torchvision (squash) transform.
 
     NOT the index gate — the NAS does its own preprocessing at inference (see the
@@ -234,9 +227,7 @@ def embed_openclip(
     import open_clip
     import torch
 
-    model, _, preprocess = open_clip.create_model_and_transforms(
-        OPENCLIP_ARCH, pretrained=OPENCLIP_PRETRAINED
-    )
+    model, _, preprocess = open_clip.create_model_and_transforms(OPENCLIP_ARCH, pretrained=OPENCLIP_PRETRAINED)
     tokenizer = open_clip.get_tokenizer(OPENCLIP_ARCH)
     model = model.to(device).eval()
 
@@ -319,12 +310,16 @@ def embed_hf(
         with torch.no_grad():
             for q in queries:
                 if variant == "immich":
+                    assert immich_tok is not None
                     ids = torch.from_numpy(immich_tok(q)).to(device)
                     f = pooled(model.get_text_features(input_ids=ids))
                 else:
                     inputs = processor(
-                        text=[q], return_tensors="pt", padding="max_length",
-                        max_length=SIGLIP_CONTEXT_LEN, truncation=True,
+                        text=[q],
+                        return_tensors="pt",
+                        padding="max_length",
+                        max_length=SIGLIP_CONTEXT_LEN,
+                        truncation=True,
                     ).to(device)
                     f = pooled(model.get_text_features(**inputs))
                 f = f / f.norm(dim=-1, keepdim=True)
@@ -398,9 +393,7 @@ def main() -> int:
     if args.queries_file:
         queries = [ln.strip() for ln in args.queries_file.read_text().splitlines() if ln.strip()]
 
-    images, used_synthetic = load_images(
-        args.images, args.num_images, args.cache_dir, allow_synthetic=args.allow_synthetic
-    )
+    images, used_synthetic = load_images(args.images, args.num_images, args.cache_dir, allow_synthetic=args.allow_synthetic)
     labels = [name for name, _ in images]
     print(f"[setup] {len(images)} images x {len(queries)} queries; references={args.ref}; device={args.device}")
 
@@ -445,12 +438,9 @@ def main() -> int:
 
         emit()
         emit(f"### MLX vs {ref_name}")
-        emit(f"  IMAGE cosine: min={ist['min']:.4f} mean={ist['mean']:.4f} "
-             f"median={ist['median']:.4f} max={ist['max']:.4f}")
-        emit(f"  TEXT  cosine: min={tst['min']:.4f} mean={tst['mean']:.4f} "
-             f"median={tst['median']:.4f} max={tst['max']:.4f}")
-        emit(f"  Cross-modal: top-1 retrieval agreement={agree['top1_agreement']:.3f} "
-             f"matrix_corr={agree['matrix_corr']:.4f}")
+        emit(f"  IMAGE cosine: min={ist['min']:.4f} mean={ist['mean']:.4f} median={ist['median']:.4f} max={ist['max']:.4f}")
+        emit(f"  TEXT  cosine: min={tst['min']:.4f} mean={tst['mean']:.4f} median={tst['median']:.4f} max={tst['max']:.4f}")
+        emit(f"  Cross-modal: top-1 retrieval agreement={agree['top1_agreement']:.3f} matrix_corr={agree['matrix_corr']:.4f}")
         emit("  per-image:")
         for lbl, s in zip(labels, img_sims):
             flag = "" if s >= args.threshold else "  <-- below threshold"
@@ -481,8 +471,7 @@ def main() -> int:
         # Port is exact, but clip.py uses HF SiglipProcessor (squash) while the
         # Immich server resizes-shortest + center-crops. That geometry mismatch
         # is the whole gap and it lives entirely in clip.py preprocessing.
-        emit(f"VERDICT: FIX-PREPROCESSING (image cosine vs Immich server < {args.threshold}; "
-             "MLX==transformers to ~1.0).")
+        emit(f"VERDICT: FIX-PREPROCESSING (image cosine vs Immich server < {args.threshold}; MLX==transformers to ~1.0).")
         emit("  The MLX port and weights are exact; the gap is the IMAGE RESIZE only:")
         emit("  clip.py uses HF SiglipProcessor (squash to 384^2) but the Immich")
         emit("  server resizes the shortest side to 384 then center-crops. On")

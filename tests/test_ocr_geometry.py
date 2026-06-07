@@ -5,13 +5,21 @@ to Immich (top-left-origin, pixel, 8-coord clockwise quad) conversion was
 previously inlined in recognize_text() and untested. Covers the Y-flip, pixel
 scaling, integer truncation, and corner ordering.
 """
+
 from src.models.ocr import normalized_bbox_to_box
 
 
 def test_full_frame_box_maps_to_image_corners():
     # Whole image: origin (0,0), size (1,1). Y-flip leaves it spanning the frame.
     assert normalized_bbox_to_box(0.0, 0.0, 1.0, 1.0, 100, 200) == [
-        0, 0, 100, 0, 100, 200, 0, 200,
+        0,
+        0,
+        100,
+        0,
+        100,
+        200,
+        0,
+        200,
     ]
 
 

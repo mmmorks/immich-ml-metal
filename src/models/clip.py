@@ -5,17 +5,20 @@ Supports dynamic model loading based on Immich requests.
 Thread-safe for both loading and inference.
 """
 
-import mlx.core as mx
-import numpy as np
-from PIL import Image
-from pathlib import Path
-from typing import Optional
-import io
+import contextlib
 import gc
+import io
 import logging
 import os
 import re
 import threading
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
+
+import mlx.core as mx
+import numpy as np
+from PIL import Image
 
 from src.models.immich_preprocess import siglip_image_pixels
 
@@ -173,9 +176,7 @@ def _siglip2_hf_repo() -> str:
     untested). Set ``ML_SIGLIP2_HF_REPO=`` (empty) to disable the download step
     and convert the bf16 source locally instead.
     """
-    return os.getenv(
-        "ML_SIGLIP2_HF_REPO", "mlx-community/siglip2-so400m-patch16-384"
-    ).strip()
+    return os.getenv("ML_SIGLIP2_HF_REPO", "mlx-community/siglip2-so400m-patch16-384").strip()
 
 
 def _download_siglip2_repo(hf_repo: str, out: Path) -> bool:
@@ -225,40 +226,27 @@ def ensure_siglip2_source(repo_id: str) -> tuple[str, str]:
     # dir name must carry a 'patchNN-NNN' token; without it, skip local
     # materialization entirely and load the HF bf16 repo.
     if not re.search(r"patch\d+-\d+", out.name):
-        logger.warning(
-            f"Cache dir name {out.name!r} lacks a 'patchNN-NNN' token the loader "
-            "regex needs; loading HF bf16 instead of materializing a local cache"
-        )
+        logger.warning(f"Cache dir name {out.name!r} lacks a 'patchNN-NNN' token the loader regex needs; loading HF bf16 instead of materializing a local cache")
         return repo_id, "hf"
 
     # 2. Pre-converted fp16 repo download.
     hf_repo = _siglip2_hf_repo()
     if hf_repo:
-        logger.info(
-            f"Fetching pre-converted SigLIP2 fp16 weights {hf_repo} -> {out}"
-        )
+        logger.info(f"Fetching pre-converted SigLIP2 fp16 weights {hf_repo} -> {out}")
         try:
             if _download_siglip2_repo(hf_repo, out):
-                logger.info(
-                    f"Loaded pre-converted SigLIP2 from {hf_repo} -> {out}"
-                )
+                logger.info(f"Loaded pre-converted SigLIP2 from {hf_repo} -> {out}")
                 return str(out), "cache"
-            logger.warning(
-                f"Downloaded {hf_repo} but {out} is incomplete; trying local convert"
-            )
+            logger.warning(f"Downloaded {hf_repo} but {out} is incomplete; trying local convert")
         except Exception as e:
             logger.warning(
-                f"Pre-converted SigLIP2 download from {hf_repo} failed ({e}); "
-                "trying local convert",
+                f"Pre-converted SigLIP2 download from {hf_repo} failed ({e}); trying local convert",
                 exc_info=True,
             )
 
     # 3. On-demand local convert.
     if _siglip2_auto_convert_enabled():
-        logger.info(
-            f"Converting SigLIP2 {repo_id} -> {out} once "
-            "(fp16, ~2.2 GB; set ML_SIGLIP2_AUTO_CONVERT=0 to load HF bf16)"
-        )
+        logger.info(f"Converting SigLIP2 {repo_id} -> {out} once (fp16, ~2.2 GB; set ML_SIGLIP2_AUTO_CONVERT=0 to load HF bf16)")
         try:
             if _convert_siglip2(repo_id, out):
                 logger.info(f"On-demand SigLIP2 convert complete -> {out}")
@@ -320,11 +308,7 @@ def resolve_fallback_arch(model_name: str) -> tuple[str, str]:
         return OPENCLIP_MAP[model_name]
     if "__" in model_name:
         arch, pretrained = model_name.split("__", 1)
-        if (
-            pretrained == "openai"
-            and "quickgelu" not in arch.lower()
-            and "siglip" not in arch.lower()
-        ):
+        if pretrained == "openai" and "quickgelu" not in arch.lower() and "siglip" not in arch.lower():
             arch = arch + "-quickgelu"
         return arch, pretrained
     return "ViT-B-32-quickgelu", "openai"
@@ -338,6 +322,9 @@ class MLXClip:
         self._model = None
         self._processor = None
         self._tokenizer = None
+        # Set on the native SigLIP2 load path (a SiglipTextTokenizer); tests
+        # inject a plain callable, so type it as a generic text->ids callable.
+        self._siglip_tokenizer: Callable[[str], Any] | None = None
         self._loaded = False
         self._repo_id = MODEL_MAP.get(model_name, MODEL_MAP.get("default"))
         # Use the global metal_lock — Vision framework also touches Metal
@@ -356,9 +343,7 @@ class MLXClip:
                 self._load_siglip2_mlx()
                 return
             except Exception as e:
-                logger.error(
-                    f"mlx-embeddings SigLIP2 load failed: {e}", exc_info=True
-                )
+                logger.error(f"mlx-embeddings SigLIP2 load failed: {e}", exc_info=True)
                 logger.info("Falling back to open_clip for SigLIP2")
                 self._load_fallback()
                 return
@@ -366,15 +351,11 @@ class MLXClip:
         self._repo_id = MODEL_MAP.get(self.model_name)
 
         if self._repo_id is None and self.model_name not in OPENCLIP_MAP:
-            logger.warning(
-                f"Unknown model '{self.model_name}', using MLX default (ViT-B-32)"
-            )
+            logger.warning(f"Unknown model '{self.model_name}', using MLX default (ViT-B-32)")
             self._repo_id = MODEL_MAP["default"]
 
         if self._repo_id is None:
-            logger.info(
-                f"No MLX version for {self.model_name}, using open_clip fallback"
-            )
+            logger.info(f"No MLX version for {self.model_name}, using open_clip fallback")
             self._load_fallback()
             return
 
@@ -413,10 +394,7 @@ class MLXClip:
         # still contain 'patchNN-NNN' (the loader regex needs it).
         path_or_repo, source = ensure_siglip2_source(repo)
 
-        logger.info(
-            f"Loading SigLIP2 via mlx-embeddings: {self.model_name} -> "
-            f"{path_or_repo} (source={source})"
-        )
+        logger.info(f"Loading SigLIP2 via mlx-embeddings: {self.model_name} -> {path_or_repo} (source={source})")
         # load() returns (model, SiglipProcessor), but the SigLIP2 paths
         # preprocess via src.models.immich_preprocess (siglip_image_pixels +
         # SiglipTextTokenizer, see ml-ycd.4), so the processor is unused here —
@@ -437,38 +415,29 @@ class MLXClip:
 
         self._use_mlx_embeddings = True
         self._loaded = True
-        logger.info(
-            f"Successfully loaded SigLIP2 via mlx-embeddings: {self.model_name}"
-        )
+        logger.info(f"Successfully loaded SigLIP2 via mlx-embeddings: {self.model_name}")
 
     def _load_fallback(self):
         """Fallback to open_clip with MPS acceleration."""
         try:
-            import torch
             import open_clip
+            import torch
         except ImportError as e:
             logger.error(f"open_clip not available and MLX failed: {e}")
-            raise RuntimeError(
-                "Neither mlx_clip nor open_clip available. "
-                "Install one with: pip install open-clip-torch"
-            ) from e
+            raise RuntimeError("Neither mlx_clip nor open_clip available. Install one with: pip install open-clip-torch") from e
 
         arch, pretrained = resolve_fallback_arch(self.model_name)
 
         logger.info(f"Loading open_clip model: {arch} / {pretrained}")
 
         try:
-            model, _, preprocess = open_clip.create_model_and_transforms(
-                arch, pretrained=pretrained
-            )
+            model, _, preprocess = open_clip.create_model_and_transforms(arch, pretrained=pretrained)
             tokenizer = open_clip.get_tokenizer(arch)
         except Exception as e:
             logger.warning(f"Failed to load {arch}/{pretrained}: {e}")
             logger.info("Falling back to ViT-B-32-quickgelu/openai")
             arch, pretrained = "ViT-B-32-quickgelu", "openai"
-            model, _, preprocess = open_clip.create_model_and_transforms(
-                arch, pretrained=pretrained
-            )
+            model, _, preprocess = open_clip.create_model_and_transforms(arch, pretrained=pretrained)
             tokenizer = open_clip.get_tokenizer(arch)
 
         if torch.backends.mps.is_available():
@@ -487,9 +456,7 @@ class MLXClip:
         self._use_fallback = True
         self._loaded = True
 
-        logger.info(
-            f"Successfully loaded CLIP model via open_clip: {arch}/{pretrained}"
-        )
+        logger.info(f"Successfully loaded CLIP model via open_clip: {arch}/{pretrained}")
 
     def _infer_with_swap_retry(self, label: str, prepare, run):
         """Shared scaffolding for every encode path.
@@ -512,21 +479,15 @@ class MLXClip:
                 # A concurrent get_clip_model() switched models and unloaded
                 # the instance we still hold (self._model -> None). Bail out
                 # cleanly instead of crashing on a None attribute access.
-                raise RuntimeError(
-                    "CLIP model was unloaded during a concurrent model switch"
-                )
+                raise RuntimeError("CLIP model was unloaded during a concurrent model switch")
             prepared = prepare(model_ref)
 
             with self._inference_lock:
                 if self._model is not model_ref:
                     if attempt == 0:
-                        logger.warning(
-                            "CLIP model changed during %s, retrying", label
-                        )
+                        logger.warning("CLIP model changed during %s, retrying", label)
                         continue
-                    raise RuntimeError(
-                        f"CLIP model changed during {label} after retry"
-                    )
+                    raise RuntimeError(f"CLIP model changed during {label} after retry")
                 return run(model_ref, prepared)
 
         # Should never reach here — range(2) always runs and either
@@ -560,7 +521,7 @@ class MLXClip:
             return model_ref.img_processor([image])
 
         def run(model_ref, processed):
-            output = model_ref.model(**{"pixel_values": processed})
+            output = model_ref.model(pixel_values=processed)
             embedding = output.image_embeds[0]
             # Force Metal evaluation inside the lock — MLX arrays are lazy,
             # and Metal work must complete before releasing the lock so
@@ -584,6 +545,7 @@ class MLXClip:
         import torch
 
         def prepare(model_ref):
+            assert self._processor is not None
             return self._processor(image).unsqueeze(0).to(self._device)
 
         def run(model_ref, image_tensor):
@@ -591,9 +553,7 @@ class MLXClip:
                 embedding = model_ref.encode_image(image_tensor)
                 return _l2_normalize_torch(embedding)
 
-        embedding = self._infer_with_swap_retry(
-            "preprocessing (fallback)", prepare, run
-        )
+        embedding = self._infer_with_swap_retry("preprocessing (fallback)", prepare, run)
         # .cpu() triggers MPS device sync — safe outside the lock because MPS
         # uses its own command queue (unlike MLX which shares the Metal command
         # buffer with Vision framework).
@@ -611,6 +571,7 @@ class MLXClip:
         retry on a concurrent model swap. get_image_features returns an
         un-normalized (1, 1152) pooled output, so we L2-normalize manually.
         """
+
         # Immich-faithful preprocessing is model-independent; run() does only
         # the lazy Metal inference inside the lock.
         def prepare(model_ref):
@@ -621,9 +582,7 @@ class MLXClip:
             # Force Metal evaluation inside the lock — MLX arrays are lazy.
             return np.array(features[0])
 
-        embedding = self._infer_with_swap_retry(
-            "preprocessing (siglip2)", prepare, run
-        )
+        embedding = self._infer_with_swap_retry("preprocessing (siglip2)", prepare, run)
         embedding = _l2_normalize(embedding)
         return embedding.flatten().astype(np.float32)
 
@@ -644,9 +603,7 @@ class MLXClip:
         with self._inference_lock:
             model_ref = self._model
             if model_ref is None:
-                raise RuntimeError(
-                    "CLIP model was unloaded during a concurrent model switch"
-                )
+                raise RuntimeError("CLIP model was unloaded during a concurrent model switch")
             embedding = model_ref.text_encoder(text)
             if isinstance(embedding, mx.array):
                 embedding = np.array(embedding)
@@ -663,6 +620,7 @@ class MLXClip:
         import torch
 
         def prepare(model_ref):
+            assert self._tokenizer is not None
             return self._tokenizer([text]).to(self._device)
 
         def run(model_ref, tokens):
@@ -670,9 +628,7 @@ class MLXClip:
                 embedding = model_ref.encode_text(tokens)
                 return _l2_normalize_torch(embedding)
 
-        embedding = self._infer_with_swap_retry(
-            "tokenization (text fallback)", prepare, run
-        )
+        embedding = self._infer_with_swap_retry("tokenization (text fallback)", prepare, run)
         return embedding.squeeze().cpu().numpy().astype(np.float32)
 
     def _encode_text_siglip2(self, text: str) -> np.ndarray:
@@ -687,9 +643,11 @@ class MLXClip:
         serialized, with one retry on a concurrent swap. get_text_features
         returns an un-normalized (1, 1152) pooled output, so we L2-normalize.
         """
+
         # Immich-faithful tokenization is model-independent; run() does only
         # the lazy Metal inference inside the lock.
         def prepare(model_ref):
+            assert self._siglip_tokenizer is not None
             return mx.array(self._siglip_tokenizer(text))
 
         def run(model_ref, input_ids):
@@ -697,9 +655,7 @@ class MLXClip:
             # Force Metal evaluation inside the lock — MLX arrays are lazy.
             return np.array(features[0])
 
-        embedding = self._infer_with_swap_retry(
-            "tokenization (siglip2)", prepare, run
-        )
+        embedding = self._infer_with_swap_retry("tokenization (siglip2)", prepare, run)
         embedding = _l2_normalize(embedding)
         return embedding.flatten().astype(np.float32)
 
@@ -718,19 +674,17 @@ class MLXClip:
         try:
             mx.clear_cache()
         except AttributeError:
-            try:
+            with contextlib.suppress(Exception):
                 mx.metal.clear_cache()
-            except Exception:
-                pass
 
 
 # Global model cache with thread safety
-_current_model: Optional[MLXClip] = None
-_current_model_name: Optional[str] = None
+_current_model: MLXClip | None = None
+_current_model_name: str | None = None
 _model_lock = threading.Lock()
 
 
-def get_loaded_clip_model_name() -> Optional[str]:
+def get_loaded_clip_model_name() -> str | None:
     """Name of the currently-loaded CLIP model, or None if none is loaded.
 
     Lets callers reuse the live model instead of forcing a switch to a configured
@@ -753,9 +707,7 @@ def get_clip_model(model_name: str = "ViT-B-32__openai") -> MLXClip:
 
     with _model_lock:
         if _current_model is not None and _current_model_name != normalized_name:
-            logger.info(
-                f"Switching CLIP model: {_current_model_name} -> {normalized_name}"
-            )
+            logger.info(f"Switching CLIP model: {_current_model_name} -> {normalized_name}")
             _current_model.unload()
             _current_model = None
             _current_model_name = None
@@ -774,9 +726,7 @@ if __name__ == "__main__":
     import sys
 
     logger.info("Testing CLIP model loading...")
-    logger.info(
-        f"Supported MLX models: {[k for k, v in MODEL_MAP.items() if v is not None and k != 'default']}"
-    )
+    logger.info(f"Supported MLX models: {[k for k, v in MODEL_MAP.items() if v is not None and k != 'default']}")
     logger.info(f"Supported open_clip models: {list(OPENCLIP_MAP.keys())}")
 
     logger.info("\n--- Testing MLX model ---")

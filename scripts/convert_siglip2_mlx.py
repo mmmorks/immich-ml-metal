@@ -25,6 +25,7 @@ Usage (from ml/, venv active):
     .venv/bin/python scripts/convert_siglip2_mlx.py \
         --upload-repo mlx-community/siglip2-so400m-patch16-384       # publish (ml-yo9)
 """
+
 from __future__ import annotations
 
 import argparse
@@ -37,7 +38,7 @@ ML_ROOT = Path(__file__).resolve().parent.parent
 if str(ML_ROOT) not in sys.path:
     sys.path.insert(0, str(ML_ROOT))
 
-from src.models.clip import (  # noqa: E402
+from src.models.clip import (
     MLX_EMBEDDINGS_MAP,
     siglip2_cache_dir,
     siglip2_dir_is_complete,
@@ -59,9 +60,7 @@ def _require_patch_token(value: str, flag: str) -> None:
     """
     if not _PATCH_TOKEN.search(value):
         raise ValueError(
-            f"{flag} {value!r} lacks a 'patchNN-NNN' token; the mlx-embeddings "
-            "loader regex-parses the patch size from the path and will crash. "
-            "Use e.g. '.../siglip2-so400m-patch16-384'."
+            f"{flag} {value!r} lacks a 'patchNN-NNN' token; the mlx-embeddings loader regex-parses the patch size from the path and will crash. Use e.g. '.../siglip2-so400m-patch16-384'."
         )
 
 
@@ -105,10 +104,7 @@ def _verify_load(path: Path) -> None:
     os.environ["ML_SIGLIP2_MLX_PATH"] = str(path)
     clip = MLXClip("ViT-SO400M-16-SigLIP2-384__webli")
     if not getattr(clip, "_use_mlx_embeddings", False):
-        raise SystemExit(
-            "[verify] FAILED: backend fell back off the native MLX path "
-            "(check the load error logged above)"
-        )
+        raise SystemExit("[verify] FAILED: backend fell back off the native MLX path (check the load error logged above)")
 
     buf = io.BytesIO()
     Image.new("RGB", (64, 64), color=(120, 80, 200)).save(buf, format="JPEG")
@@ -117,9 +113,7 @@ def _verify_load(path: Path) -> None:
     for name, emb in (("image", img), ("text", txt)):
         norm = float(np.linalg.norm(emb))
         if emb.shape != (1152,) or abs(norm - 1.0) > 1e-3:
-            raise SystemExit(
-                f"[verify] FAILED: {name} embedding shape={emb.shape} norm={norm:.5f}"
-            )
+            raise SystemExit(f"[verify] FAILED: {name} embedding shape={emb.shape} norm={norm:.5f}")
         print(f"[verify] {name}: shape={emb.shape} norm={norm:.5f} OK")
     print("[verify] OK")
 
@@ -137,8 +131,7 @@ def main() -> int:
     ap.add_argument(
         "--mlx-path",
         default=None,
-        help="Output dir. Default: the accelerator's local cache dir "
-        "(siglip2_cache_dir). Its name MUST contain a 'patchNN-NNN' token.",
+        help="Output dir. Default: the accelerator's local cache dir (siglip2_cache_dir). Its name MUST contain a 'patchNN-NNN' token.",
     )
     ap.add_argument(
         "--dtype",
@@ -196,20 +189,14 @@ def main() -> int:
     )
 
     if not siglip2_dir_is_complete(out):
-        raise SystemExit(
-            f"[convert] FAILED: {out} is missing config.json / tokenizer.json / "
-            "*.safetensors after conversion"
-        )
+        raise SystemExit(f"[convert] FAILED: {out} is missing config.json / tokenizer.json / *.safetensors after conversion")
     print(f"[convert] OK -> {out}")
     print("  files:", ", ".join(sorted(p.name for p in out.iterdir())))
 
     if args.verify:
         _verify_load(out)
 
-    print(
-        "\nThe accelerator now auto-loads this convert (no env var needed) as "
-        "long as it stays in the default cache dir."
-    )
+    print("\nThe accelerator now auto-loads this convert (no env var needed) as long as it stays in the default cache dir.")
     return 0
 
 

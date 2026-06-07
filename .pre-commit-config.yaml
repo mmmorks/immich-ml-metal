@@ -1,0 +1,17 @@
+# Pre-commit gate for the ml submodule (immich-ml-metal).
+# Install once with: pre-commit install
+#
+# Only ruff (lint + format) runs here: the test suite and pyright both need the
+# heavy native venv (mlx, insightface, cv2, onnxruntime) which isn't always
+# present, and mlx is Apple-Silicon-only. Run those manually:
+#   .venv/bin/python -m pytest        # tests
+#   pyright                           # type check (needs the venv on PYTHONPATH)
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.16
+    hooks:
+      - id: ruff
+        name: ruff (lint + autofix)
+        args: [--fix]
+      - id: ruff-format
+        name: ruff (format)

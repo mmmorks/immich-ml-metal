@@ -7,6 +7,7 @@ the 'patchNN-NNN' token (which would crash mlx-embeddings' load() on consumers).
 The script is loaded by path (scripts/ is not a package) so these run without a
 heavyweight convert.
 """
+
 import importlib.util
 from pathlib import Path
 
@@ -17,6 +18,7 @@ _SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "convert_siglip2_mlx
 
 def _load_module():
     spec = importlib.util.spec_from_file_location("convert_siglip2_mlx", _SCRIPT)
+    assert spec is not None and spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -37,9 +39,7 @@ def test_accepts_bare_dir_name():
 def test_allows_precision_suffix():
     """The loader regex (patch\\d+-(\\d+)(?:-|$)) tolerates a trailing -suffix,
     so the guard must accept conventional quant/dtype suffixes too."""
-    mod._require_patch_token(
-        "mlx-community/siglip2-so400m-patch16-384-4bit", "--upload-repo"
-    )
+    mod._require_patch_token("mlx-community/siglip2-so400m-patch16-384-4bit", "--upload-repo")
 
 
 @pytest.mark.parametrize(
@@ -49,9 +49,7 @@ def test_allows_precision_suffix():
 def test_allows_publish_naming_suffixes(suffix):
     """Every mlx-community publish variant (ml-yo9) is dash-introduced, so the
     loader's ``(?:-|$)`` anchor matches and the guard must accept it."""
-    mod._require_patch_token(
-        f"mlx-community/siglip2-so400m-patch16-384{suffix}", "--upload-repo"
-    )
+    mod._require_patch_token(f"mlx-community/siglip2-so400m-patch16-384{suffix}", "--upload-repo")
 
 
 @pytest.mark.parametrize(
@@ -88,9 +86,7 @@ def test_upload_existing_reads_config_and_uploads(tmp_path, monkeypatch):
 
     (tmp_path / "config.json").write_text(json.dumps({"vision_config": {}}))
     calls = []
-    monkeypatch.setattr(
-        utils, "upload_to_hub", lambda *a, **k: calls.append((a, k))
-    )
+    monkeypatch.setattr(utils, "upload_to_hub", lambda *a, **k: calls.append((a, k)))
 
     mod._upload_existing(tmp_path, "mmmorks/siglip2-so400m-patch16-384", "google/x")
 
@@ -110,9 +106,7 @@ def test_main_uploads_when_cache_complete(tmp_path, monkeypatch):
 
     monkeypatch.setattr(mod, "siglip2_dir_is_complete", lambda _p: True)
     uploaded = []
-    monkeypatch.setattr(
-        mod, "_upload_existing", lambda *a: uploaded.append(a)
-    )
+    monkeypatch.setattr(mod, "_upload_existing", lambda *a: uploaded.append(a))
     monkeypatch.setattr(
         "sys.argv",
         [

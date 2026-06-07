@@ -52,7 +52,6 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 
@@ -63,10 +62,9 @@ for p in (str(ML_ROOT), str(SCRIPTS_DIR)):
     if p not in sys.path:
         sys.path.insert(0, p)
 
-import mlx.core as mx  # noqa: E402
-
 # Reuse the parity harness' loaders/metrics so both tools test identical inputs.
-import embedding_parity as parity  # noqa: E402
+import embedding_parity as parity
+import mlx.core as mx
 
 IMMICH_MODEL = parity.IMMICH_MODEL  # "ViT-SO400M-16-SigLIP2-384__webli"
 EMBED_DIM = parity.EMBED_DIM  # 1152
@@ -102,14 +100,10 @@ class Precision:
 # harness records the failure instead of crashing.
 CONFIGS: dict[str, Precision] = {
     "fp16": Precision("fp16", quantize=False, bits=16, note="baseline (production convert)"),
-    "8bit-textonly": Precision("8bit-textonly", quantize=True, bits=8, skip_vision=True,
-                               note="affine, text tower only (mlx default; vision stays fp16)"),
-    "4bit-textonly": Precision("4bit-textonly", quantize=True, bits=4, skip_vision=True,
-                               note="affine, text tower only (mlx default; vision stays fp16)"),
-    "8bit": Precision("8bit", quantize=True, bits=8, skip_vision=False,
-                      note="affine vision+text — UNSUPPORTED by mlx_embeddings 0.1.0 vision head"),
-    "4bit": Precision("4bit", quantize=True, bits=4, skip_vision=False,
-                      note="affine vision+text — UNSUPPORTED by mlx_embeddings 0.1.0 vision head"),
+    "8bit-textonly": Precision("8bit-textonly", quantize=True, bits=8, skip_vision=True, note="affine, text tower only (mlx default; vision stays fp16)"),
+    "4bit-textonly": Precision("4bit-textonly", quantize=True, bits=4, skip_vision=True, note="affine, text tower only (mlx default; vision stays fp16)"),
+    "8bit": Precision("8bit", quantize=True, bits=8, skip_vision=False, note="affine vision+text — UNSUPPORTED by mlx_embeddings 0.1.0 vision head"),
+    "4bit": Precision("4bit", quantize=True, bits=4, skip_vision=False, note="affine vision+text — UNSUPPORTED by mlx_embeddings 0.1.0 vision head"),
 }
 
 # What we evaluate unless --configs overrides: the runnable set.
@@ -124,13 +118,13 @@ class Result:
     peak_mem_bytes: int
     img_ms: float  # mean per-image encode latency
     txt_ms: float  # mean per-text encode latency
-    img_embeds: Optional[np.ndarray] = field(repr=False, default=None)
-    txt_embeds: Optional[np.ndarray] = field(repr=False, default=None)
+    img_embeds: np.ndarray | None = field(repr=False, default=None)
+    txt_embeds: np.ndarray | None = field(repr=False, default=None)
     # Filled in vs the fp16 baseline (None on the baseline row itself):
-    img_cos: Optional[dict] = None
-    txt_cos: Optional[dict] = None
-    agree: Optional[dict] = None
-    error: Optional[str] = None  # set if the config converted but failed to infer
+    img_cos: dict | None = None
+    txt_cos: dict | None = None
+    agree: dict | None = None
+    error: str | None = None  # set if the config converted but failed to infer
 
 
 # --------------------------------------------------------------------------- #
@@ -165,8 +159,7 @@ def ensure_convert(cfg: Precision, source: str, out_root: Path) -> Path:
     out.parent.mkdir(parents=True, exist_ok=True)
     from mlx_embeddings.convert import convert
 
-    print(f"[convert] {cfg.key}: {source} -> {out} "
-          f"(quantize={cfg.quantize} bits={cfg.bits} skip_vision={cfg.skip_vision})")
+    print(f"[convert] {cfg.key}: {source} -> {out} (quantize={cfg.quantize} bits={cfg.bits} skip_vision={cfg.skip_vision})")
     convert(
         hf_path=source,
         mlx_path=str(out),
@@ -229,8 +222,12 @@ def evaluate(
     clip = MLXClip(IMMICH_MODEL)
     if not getattr(clip, "_use_mlx_embeddings", False):
         return Result(
-            key=cfg.key, note=cfg.note, disk_bytes=dir_weight_bytes(convert_dir),
-            peak_mem_bytes=0, img_ms=0.0, txt_ms=0.0,
+            key=cfg.key,
+            note=cfg.note,
+            disk_bytes=dir_weight_bytes(convert_dir),
+            peak_mem_bytes=0,
+            img_ms=0.0,
+            txt_ms=0.0,
             error="backend fell back off the native MLX path (load failed)",
         )
 
@@ -260,8 +257,12 @@ def evaluate(
     except Exception as e:  # converted OK but inference unsupported (e.g. quantized vision head)
         print(f"[{cfg.key}] inference FAILED: {type(e).__name__}: {e}")
         return Result(
-            key=cfg.key, note=cfg.note, disk_bytes=dir_weight_bytes(convert_dir),
-            peak_mem_bytes=0, img_ms=0.0, txt_ms=0.0,
+            key=cfg.key,
+            note=cfg.note,
+            disk_bytes=dir_weight_bytes(convert_dir),
+            peak_mem_bytes=0,
+            img_ms=0.0,
+            txt_ms=0.0,
             error=f"{type(e).__name__}: {e}",
         )
     finally:
@@ -285,22 +286,18 @@ def score_vs_baseline(res: Result, base: Result) -> None:
     """Fill cosine/agreement fields comparing ``res`` to the fp16 baseline."""
     assert res.img_embeds is not None and res.txt_embeds is not None
     assert base.img_embeds is not None and base.txt_embeds is not None
-    img_sims = np.array([parity.cosine(res.img_embeds[i], base.img_embeds[i])
-                         for i in range(len(base.img_embeds))])
-    txt_sims = np.array([parity.cosine(res.txt_embeds[j], base.txt_embeds[j])
-                         for j in range(len(base.txt_embeds))])
+    img_sims = np.array([parity.cosine(res.img_embeds[i], base.img_embeds[i]) for i in range(len(base.img_embeds))])
+    txt_sims = np.array([parity.cosine(res.txt_embeds[j], base.txt_embeds[j]) for j in range(len(base.txt_embeds))])
     res.img_cos = parity.stats(img_sims)
     res.txt_cos = parity.stats(txt_sims)
-    res.agree = parity.retrieval_agreement(
-        res.img_embeds, res.txt_embeds, base.img_embeds, base.txt_embeds
-    )
+    res.agree = parity.retrieval_agreement(res.img_embeds, res.txt_embeds, base.img_embeds, base.txt_embeds)
 
 
 # --------------------------------------------------------------------------- #
 # Reporting
 # --------------------------------------------------------------------------- #
 def gib(n: int) -> float:
-    return n / (1024 ** 3)
+    return n / (1024**3)
 
 
 def pct_save(new: int, base: int) -> str:
@@ -333,9 +330,7 @@ def recommend(results: list[Result]) -> tuple[str, list[str]]:
     rationale: list[str] = []
     base = next(r for r in results if r.key == "fp16")
 
-    for r in results:
-        if r.error:
-            rationale.append(f"{r.key}: UNSUPPORTED — {r.error}")
+    rationale.extend(f"{r.key}: UNSUPPORTED — {r.error}" for r in results if r.error)
 
     candidates = sorted(
         (r for r in results if r.key != "fp16" and not r.error),
@@ -361,10 +356,7 @@ def recommend(results: list[Result]) -> tuple[str, list[str]]:
         opt = usable[0]  # smallest retrieval-preserving variant
         disk_save = pct_save(opt.disk_bytes, base.disk_bytes)
         mem_save = pct_save(opt.peak_mem_bytes, base.peak_mem_bytes)
-        rationale.append(
-            f"=> DEFAULT: fp16 (unchanged) — quantization can't reach the vision "
-            f"tower, so the image-indexing path gets no speed/accuracy benefit."
-        )
+        rationale.append("=> DEFAULT: fp16 (unchanged) — quantization can't reach the vision tower, so the image-indexing path gets no speed/accuracy benefit.")
         rationale.append(
             f"=> OPT-IN: {opt.key} — near-lossless ({disk_save} smaller disk, "
             f"{mem_save} lower peak memory, retrieval identical) for "
@@ -372,10 +364,7 @@ def recommend(results: list[Result]) -> tuple[str, list[str]]:
             f"mlx_embeddings can quantize the SigLIP vision attention."
         )
     else:
-        rationale.append(
-            "=> DEFAULT: fp16 — no runnable quantized variant preserved retrieval; "
-            "the savings don't justify index/search drift."
-        )
+        rationale.append("=> DEFAULT: fp16 — no runnable quantized variant preserved retrieval; the savings don't justify index/search drift.")
     return "fp16", rationale
 
 
@@ -396,25 +385,22 @@ def build_report(results: list[Result], images, queries) -> list[str]:
     emit()
 
     # Headline table.
-    hdr = (f"{'precision':<16} {'disk GiB':>9} {'peak GiB':>9} "
-           f"{'img ms':>8} {'txt ms':>8} {'img mincos':>11} {'img mean':>9} "
-           f"{'txt mincos':>11} {'top1':>6}")
+    hdr = f"{'precision':<16} {'disk GiB':>9} {'peak GiB':>9} {'img ms':>8} {'txt ms':>8} {'img mincos':>11} {'img mean':>9} {'txt mincos':>11} {'top1':>6}"
     emit(hdr)
     emit("-" * len(hdr))
     for r in results:
         if r.error:
-            emit(f"{r.key:<16} {gib(r.disk_bytes):>9.2f} {'—':>9} "
-                 f"{'—':>8} {'—':>8} {'UNSUPPORTED (see notes)':>40}")
+            emit(f"{r.key:<16} {gib(r.disk_bytes):>9.2f} {'—':>9} {'—':>8} {'—':>8} {'UNSUPPORTED (see notes)':>40}")
         elif r.key == "fp16":
-            emit(f"{r.key:<16} {gib(r.disk_bytes):>9.2f} {gib(r.peak_mem_bytes):>9.2f} "
-                 f"{r.img_ms:>8.1f} {r.txt_ms:>8.1f} {'—':>11} {'(base)':>9} "
-                 f"{'—':>11} {'—':>6}")
+            emit(f"{r.key:<16} {gib(r.disk_bytes):>9.2f} {gib(r.peak_mem_bytes):>9.2f} {r.img_ms:>8.1f} {r.txt_ms:>8.1f} {'—':>11} {'(base)':>9} {'—':>11} {'—':>6}")
         else:
             assert r.img_cos and r.txt_cos and r.agree
-            emit(f"{r.key:<16} {gib(r.disk_bytes):>9.2f} {gib(r.peak_mem_bytes):>9.2f} "
-                 f"{r.img_ms:>8.1f} {r.txt_ms:>8.1f} {r.img_cos['min']:>11.4f} "
-                 f"{r.img_cos['mean']:>9.4f} {r.txt_cos['min']:>11.4f} "
-                 f"{r.agree['top1_agreement']:>6.3f}")
+            emit(
+                f"{r.key:<16} {gib(r.disk_bytes):>9.2f} {gib(r.peak_mem_bytes):>9.2f} "
+                f"{r.img_ms:>8.1f} {r.txt_ms:>8.1f} {r.img_cos['min']:>11.4f} "
+                f"{r.img_cos['mean']:>9.4f} {r.txt_cos['min']:>11.4f} "
+                f"{r.agree['top1_agreement']:>6.3f}"
+            )
     emit()
     emit("Notes:")
     for r in results:
@@ -427,20 +413,15 @@ def build_report(results: list[Result], images, queries) -> list[str]:
             continue
         if r.error:
             emit(f"### {r.key} vs fp16")
-            emit(f"  UNSUPPORTED: converted to {gib(r.disk_bytes):.2f} GiB but failed at "
-                 f"inference:\n    {r.error}")
+            emit(f"  UNSUPPORTED: converted to {gib(r.disk_bytes):.2f} GiB but failed at inference:\n    {r.error}")
             emit()
             continue
         assert r.img_cos and r.txt_cos and r.agree
         emit(f"### {r.key} vs fp16")
-        emit(f"  IMAGE cosine: min={r.img_cos['min']:.4f} mean={r.img_cos['mean']:.4f} "
-             f"median={r.img_cos['median']:.4f}")
-        emit(f"  TEXT  cosine: min={r.txt_cos['min']:.4f} mean={r.txt_cos['mean']:.4f} "
-             f"median={r.txt_cos['median']:.4f}")
-        emit(f"  Cross-modal: top-1 retrieval agreement={r.agree['top1_agreement']:.3f} "
-             f"matrix_corr={r.agree['matrix_corr']:.4f}")
-        emit(f"  Size: {gib(r.disk_bytes):.2f} GiB on disk ({gib(base.disk_bytes):.2f} fp16), "
-             f"peak {gib(r.peak_mem_bytes):.2f} GiB")
+        emit(f"  IMAGE cosine: min={r.img_cos['min']:.4f} mean={r.img_cos['mean']:.4f} median={r.img_cos['median']:.4f}")
+        emit(f"  TEXT  cosine: min={r.txt_cos['min']:.4f} mean={r.txt_cos['mean']:.4f} median={r.txt_cos['median']:.4f}")
+        emit(f"  Cross-modal: top-1 retrieval agreement={r.agree['top1_agreement']:.3f} matrix_corr={r.agree['matrix_corr']:.4f}")
+        emit(f"  Size: {gib(r.disk_bytes):.2f} GiB on disk ({gib(base.disk_bytes):.2f} fp16), peak {gib(r.peak_mem_bytes):.2f} GiB")
         emit()
 
     emit("-" * 88)
@@ -454,22 +435,19 @@ def build_report(results: list[Result], images, queries) -> list[str]:
 
 # --------------------------------------------------------------------------- #
 def main() -> int:
-    ap = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
-    )
-    ap.add_argument("--images", type=Path, default=None,
-                    help="dir of real images (else download deterministic samples)")
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--images", type=Path, default=None, help="dir of real images (else download deterministic samples)")
     ap.add_argument("--num-images", type=int, default=12)
     ap.add_argument("--queries-file", type=Path, default=None)
-    ap.add_argument("--configs", nargs="+", default=DEFAULT_KEYS,
-                    choices=list(CONFIGS.keys()),
-                    help="precision variants to evaluate (fp16 always included). "
-                    "Default: the runnable set. The full-vision '8bit'/'4bit' are "
-                    "opt-in and expected to fail at inference on mlx_embeddings 0.1.0.")
-    ap.add_argument("--out-root", type=Path, default=ML_ROOT / "models" / "quant_eval",
-                    help="where quantized converts are written")
-    ap.add_argument("--keep", action="store_true",
-                    help="keep converted quant dirs instead of deleting them")
+    ap.add_argument(
+        "--configs",
+        nargs="+",
+        default=DEFAULT_KEYS,
+        choices=list(CONFIGS.keys()),
+        help="precision variants to evaluate (fp16 always included). Default: the runnable set. The full-vision '8bit'/'4bit' are opt-in and expected to fail at inference on mlx_embeddings 0.1.0.",
+    )
+    ap.add_argument("--out-root", type=Path, default=ML_ROOT / "models" / "quant_eval", help="where quantized converts are written")
+    ap.add_argument("--keep", action="store_true", help="keep converted quant dirs instead of deleting them")
     ap.add_argument("--report", type=Path, default=None, help="write a markdown report here")
     ap.add_argument("--cache-dir", type=Path, default=ML_ROOT / "cache" / "parity_images")
     args = ap.parse_args()
@@ -478,7 +456,7 @@ def main() -> int:
     if args.queries_file:
         queries = [ln.strip() for ln in args.queries_file.read_text().splitlines() if ln.strip()]
 
-    images = parity.load_images(args.images, args.num_images, args.cache_dir)
+    images, _used_synthetic = parity.load_images(args.images, args.num_images, args.cache_dir)
 
     # fp16 is always the baseline and must run first.
     keys = ["fp16"] + [k for k in args.configs if k != "fp16"]

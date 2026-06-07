@@ -1,13 +1,14 @@
 """Tests for model memory management — busy guards, unload decisions, tracking."""
+
 import time
 
 from src.main import (
+    MODEL_MEMORY_FLOOR_MB,
     _mark_model_busy,
-    _track_model_use,
-    _should_unload,
     _model_busy,
     _model_last_used,
-    MODEL_MEMORY_FLOOR_MB,
+    _should_unload,
+    _track_model_use,
 )
 
 
@@ -29,6 +30,7 @@ def teardown_function():
 
 # --- Busy guard ---
 
+
 def test_busy_model_never_unloads():
     _mark_model_busy("clip")
     assert "clip" in _model_busy
@@ -44,6 +46,7 @@ def test_track_clears_busy():
 
 
 # --- Pressure strategy ---
+
 
 def test_pressure_recently_used_not_unloaded():
     """Model used just now should not unload even under pressure."""
@@ -65,6 +68,7 @@ def test_pressure_idle_but_enough_memory_stays():
 
 # --- Timeout strategy ---
 
+
 def test_timeout_strategy(monkeypatch):
     monkeypatch.setattr("src.main.MODEL_UNLOAD_STRATEGY", "timeout")
     monkeypatch.setattr("src.main.MODEL_IDLE_TIMEOUT", 10)
@@ -81,6 +85,7 @@ def test_timeout_strategy_not_yet(monkeypatch):
 
 # --- Never strategy ---
 
+
 def test_never_strategy(monkeypatch):
     monkeypatch.setattr("src.main.MODEL_UNLOAD_STRATEGY", "never")
     _model_last_used["clip"] = time.monotonic() - 9999
@@ -88,6 +93,7 @@ def test_never_strategy(monkeypatch):
 
 
 # --- Multiple models ---
+
 
 def test_independent_model_tracking():
     """CLIP and face have independent busy/tracking state."""

@@ -2,11 +2,13 @@
 
 These tests mock the ONNX model so they run without real weights.
 """
+
+from unittest.mock import MagicMock, patch
+
 import numpy as np
 import pytest
-from unittest.mock import patch, MagicMock
 
-from src.models.face_embed import get_face_embeddings_batch, ARCFACE_INPUT_SIZE
+from src.models.face_embed import get_face_embeddings_batch
 
 
 def _fake_img(w=640, h=480):
@@ -44,6 +46,7 @@ def mock_model():
 
 # --- Core batching ---
 
+
 def test_empty_faces():
     assert get_face_embeddings_batch(_fake_img(), [], "buffalo_l") == []
 
@@ -69,8 +72,7 @@ def test_multiple_faces_bbox(mock_model):
     with patch("src.models.face_embed.get_recognition_model", return_value=mock_model):
         results = get_face_embeddings_batch(img, faces)
     assert len(results) == 3
-    assert all(r is not None for r in results)
-    assert all(r.shape == (512,) for r in results)
+    assert all(r is not None and r.shape == (512,) for r in results)
 
 
 def test_result_order_preserved(mock_model):
@@ -83,11 +85,13 @@ def test_result_order_preserved(mock_model):
     with patch("src.models.face_embed.get_recognition_model", return_value=mock_model):
         results = get_face_embeddings_batch(img, faces)
     assert len(results) == 2
+    assert results[0] is not None and results[1] is not None
     # Each face should get a different embedding (random, so extremely unlikely to match)
     assert not np.array_equal(results[0], results[1])
 
 
 # --- Edge cases ---
+
 
 def test_empty_crop_returns_none(mock_model):
     """Face with zero-area bbox should return None, not crash."""
@@ -103,7 +107,7 @@ def test_mixed_success_and_failure(mock_model):
     """One good face, one bad — good gets embedding, bad gets None."""
     img = _fake_img()
     faces = [
-        _face_with_bbox(50, 50, 200, 200),   # valid
+        _face_with_bbox(50, 50, 200, 200),  # valid
         _face_with_bbox(100, 100, 100, 100),  # zero-area
         _face_with_bbox(300, 100, 500, 300),  # valid
     ]
@@ -111,7 +115,7 @@ def test_mixed_success_and_failure(mock_model):
         results = get_face_embeddings_batch(img, faces)
     assert len(results) == 3
     assert results[0] is not None  # valid
-    assert results[1] is None      # zero-area
+    assert results[1] is None  # zero-area
     assert results[2] is not None  # valid
 
 
@@ -140,10 +144,12 @@ def test_bbox_clamped_to_image(mock_model):
 
 # --- Embedding normalization ---
 
+
 def test_embeddings_are_unit_normalized(mock_model):
     img = _fake_img()
     faces = [_face_with_bbox(50, 50, 200, 200)]
     with patch("src.models.face_embed.get_recognition_model", return_value=mock_model):
         results = get_face_embeddings_batch(img, faces)
+    assert results[0] is not None
     norm = np.linalg.norm(results[0])
     assert abs(norm - 1.0) < 1e-5

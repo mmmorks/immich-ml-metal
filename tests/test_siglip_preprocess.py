@@ -87,8 +87,7 @@ def test_image_is_crop_not_squash():
     img = _make_image(800, 400)
     crop = siglip_image_pixels(img)
     squash = np.expand_dims(
-        (np.asarray(img.resize((384, 384), Image.Resampling.BICUBIC), np.float32) / 255.0 - 0.5)
-        / 0.5,
+        (np.asarray(img.resize((384, 384), Image.Resampling.BICUBIC), np.float32) / 255.0 - 0.5) / 0.5,
         0,
     ).transpose(0, 3, 1, 2)
     assert not np.allclose(crop, squash)
@@ -98,12 +97,7 @@ def test_image_is_crop_not_squash():
 # tokenizer — needs the model's tokenizer.json (skip if not cached)
 # --------------------------------------------------------------------------- #
 def _cached_tokenizer_json():
-    hits = glob.glob(
-        str(
-            Path.home()
-            / ".cache/huggingface/hub/models--google--siglip2-so400m-patch16-384/snapshots/*/tokenizer.json"
-        )
-    )
+    hits = glob.glob(str(Path.home() / ".cache/huggingface/hub/models--google--siglip2-so400m-patch16-384/snapshots/*/tokenizer.json"))
     return hits[0] if hits else None
 
 
@@ -111,7 +105,9 @@ def _cached_tokenizer_json():
 def test_tokenizer_canonicalizes_and_pads():
     from src.models.immich_preprocess import SIGLIP2_CONTEXT_LENGTH, SiglipTextTokenizer
 
-    tok = SiglipTextTokenizer(_cached_tokenizer_json())
+    tokenizer_json = _cached_tokenizer_json()
+    assert tokenizer_json is not None  # guaranteed by the skipif above
+    tok = SiglipTextTokenizer(tokenizer_json)
     a = tok("a photo of a cat")
     b = tok("  A  PHOTO of a CAT!!! ")  # canonicalizes to the same string
     assert a.shape == (1, SIGLIP2_CONTEXT_LENGTH)

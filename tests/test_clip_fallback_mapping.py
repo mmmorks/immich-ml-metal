@@ -5,6 +5,7 @@ Pure-logic coverage for ml-7j8.10: the Immich -> open_clip
 MLXClip._load_fallback() and untested. Covers the OPENCLIP_MAP lookup, the
 ``arch__pretrained`` split, quickgelu suffixing rules, and the default.
 """
+
 import pytest
 
 from src.models.clip import OPENCLIP_MAP, resolve_fallback_arch

@@ -1,0 +1,100 @@
+# Static-analysis config for the ml submodule (immich-ml-metal — the native
+# Metal ML service). This is a separate fork with its own history; the parent
+# repo (immich-apple-silicon) has its own pyproject.toml. Config here mirrors
+# the parent's so both halves of the project lint identically.
+#
+# Not a packaged distribution — runs as `python -m src.main`. No
+# [build-system]/[project] table; this file only holds the ruff + pyright
+# quality-gate config.
+
+[tool.ruff]
+target-version = "py311"
+extend-exclude = [".venv", "venv", "cache"]
+line-length = 200
+
+[tool.ruff.lint]
+# Focus: catch dead code and bugs, not style. (See parent pyproject.toml for
+# the full rationale behind this selection.)
+select = [
+    "F",      # pyflakes: unused imports/vars, undefined names, redefinitions
+    "B",      # flake8-bugbear: likely bugs (mutable defaults, etc.)
+    "RUF",    # ruff-specific lints
+    "UP",     # pyupgrade
+    "I",      # isort: import ordering
+    "S",      # flake8-bandit: shell=True, eval/exec, pickle, weak crypto, etc.
+    "A",      # flake8-builtins: shadowing list/id/type/etc.
+    "RET",    # flake8-return
+    "SIM",    # flake8-simplify
+    "LOG",    # flake8-logging
+    "TRY",    # tryceratops
+    "C4",     # flake8-comprehensions
+    "PIE",    # flake8-pie
+    "PERF",   # perflint
+    "ICN",    # flake8-import-conventions
+    "FURB",   # refurb
+]
+ignore = [
+    "E501",    # line too long (intentional — see line-length)
+    "B008",    # function calls in default args (idiomatic; FastAPI Depends etc.)
+    "RUF001",  # ambiguous unicode in strings
+    "RUF002",  # ambiguous unicode in docstrings
+    "RUF003",  # ambiguous unicode in comments
+    "B905",    # zip-without-explicit-strict (paired lists are hand-aligned)
+    "TRY003",  # long messages outside the exception class
+    "TRY400",  # logging.error in except — intentional in a service that logs context
+    "SIM108",  # use ternary instead of if-else
+    "SIM300",  # Yoda condition
+    "SIM102",  # collapsible nested if
+    "TRY300",  # "move to else block" — refactor opinion, not a bug
+    "TRY301",  # "abstract raise to inner function"
+    # The "intentionally unused tuple slot" convention here is a trailing
+    # underscore (foo_) rather than a leading one; F841 still catches genuinely
+    # forgotten locals. This rule only flags destructuring.
+    "RUF059",  # unused-unpacked-variable
+    # flake8-bandit rules that are noise for an ML server that binds a socket,
+    # shells out to converters, and downloads model weights. The high-value S
+    # rules (shell=True, eval, pickle, weak hash) stay enabled.
+    "S101",    # assert (tests + sanity invariants)
+    "S104",    # hardcoded bind-all 0.0.0.0 (the ML service binds all interfaces by design)
+    "S108",    # hardcoded /tmp paths
+    "S110",    # try-except-pass (best-effort cleanup)
+    "S310",    # urlopen (model/asset downloads)
+    "S311",    # non-crypto random
+    "S603",    # subprocess without shell=True check
+    "S606",    # start-process-with-no-shell
+    "S607",    # start-process-with-partial-path
+]
+
+[tool.ruff.lint.per-file-ignores]
+# "SIGLIP2_PAD_TOKEN" is a tokenizer pad-token constant, not a credential.
+"src/models/immich_preprocess.py" = ["S105"]
+# Tests use hardcoded fake secrets/passwords as fixtures, and class-level
+# mutable attrs on stub/mock classes (call recorders) are intentional.
+"tests/*.py" = ["S105", "S106", "RUF012"]
+# embedding_parity.py: the nested img_embeds/txt_embeds closures capture
+# `model` (assigned at the top of embed_hf) which is `del`'d at the function's
+# end for GPU-memory cleanup. Ruff's binding analysis mis-reports the captured
+# reference as F821 undefined-name; it is well-defined at call time.
+"scripts/embedding_parity.py" = ["F821"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["src"]
+
+[tool.pyright]
+include = ["src", "tests", "scripts"]
+exclude = ["**/__pycache__", ".venv", "venv", "cache"]
+typeCheckingMode = "standard"
+pythonVersion = "3.11"
+# The native ML stack (mlx, insightface, cv2, onnxruntime) ships little or no
+# type information; deep-typing it produces ~120 false "unknown attribute" /
+# spurious-Optional diagnostics on library-returned values. Treat library
+# symbols as Unknown (same choice as the retirement-calc project) so pyright
+# checks OUR code without drowning in third-party stub gaps. Run locally with
+# the venv active: `pyright` (not enforced in CI — mlx is Apple-Silicon-only,
+# so the deps can't install on Linux runners).
+useLibraryCodeForTypes = false
+# torch's top-level __init__ doesn't list most functions in __all__, so pyright
+# flags every torch.from_numpy/torch.where/torch.zeros/torch.tensor/torch.device
+# as a "private import". They are the documented public API — this rule is pure
+# noise against torch, so turn it off.
+reportPrivateImportUsage = "none"

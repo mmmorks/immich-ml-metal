@@ -17,6 +17,7 @@ test_clip_concurrency.py; this file deliberately does not duplicate it.
 A single opt-in integration test exercises the running ML service end-to-end;
 it is skipped unless ML_SERVICE_URL points at a reachable instance.
 """
+
 import io
 import os
 import re
@@ -291,9 +292,7 @@ def test_tokenizer_json_from_override_repo_not_default(monkeypatch):
     override_repo = "someuser/siglip2-so400m-patch16-384-custom"
     result = clip_module._resolve_siglip2_tokenizer_json(override_repo)
 
-    assert calls == [(override_repo, "tokenizer.json")], (
-        f"tokenizer must come from the override repo, got {calls!r}"
-    )
+    assert calls == [(override_repo, "tokenizer.json")], f"tokenizer must come from the override repo, got {calls!r}"
     assert result == f"/fake/{override_repo}/tokenizer.json"
 
 
@@ -301,9 +300,7 @@ def test_siglip2_routes_to_native_backend_not_mlx_clip():
     """SigLIP2 names handled natively must be None in MODEL_MAP so they never
     route to the mlx_clip path; they're dispatched via MLX_EMBEDDINGS_MAP."""
     for name in MLX_EMBEDDINGS_MAP:
-        assert MODEL_MAP.get(name) is None, (
-            f"{name} must be None in MODEL_MAP to avoid the mlx_clip path"
-        )
+        assert MODEL_MAP.get(name) is None, f"{name} must be None in MODEL_MAP to avoid the mlx_clip path"
 
 
 def test_model_map_default_present():
@@ -348,14 +345,15 @@ def test_get_clip_model_caches_same_name(stub_clip):
     second = get_clip_model(SIGLIP2_NAME)
     assert first is second, "same name should return the cached instance"
     assert len(stub_clip.instances) == 1, "no reload expected for same name"
-    assert not first.unloaded
+    # stub_clip patches get_clip_model to return _StubClip (has .unloaded)
+    assert not first.unloaded  # pyright: ignore[reportAttributeAccessIssue]
 
 
 def test_get_clip_model_switches_and_unloads(stub_clip):
     first = get_clip_model("ViT-B-32__openai")
     second = get_clip_model(SIGLIP2_NAME)
     assert first is not second
-    assert first.unloaded, "old model must be unloaded on switch"
+    assert first.unloaded, "old model must be unloaded on switch"  # pyright: ignore[reportAttributeAccessIssue]
     assert second.model_name == SIGLIP2_NAME
     assert len(stub_clip.instances) == 2
 
@@ -401,9 +399,7 @@ def test_predict_clip_text_integration():
 
     import requests
 
-    entries = json.dumps(
-        {"clip": {"textual": {"modelName": SIGLIP2_NAME}}}
-    )
+    entries = json.dumps({"clip": {"textual": {"modelName": SIGLIP2_NAME}}})
     resp = requests.post(
         f"{_SERVICE_URL}/predict",
         data={"entries": entries, "text": "a photo of a cat"},

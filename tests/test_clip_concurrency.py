@@ -6,6 +6,7 @@ self._model=None on the instance an in-flight encode_*() call still holds.
 The retry loops must notice the swap-to-None and raise a clean RuntimeError
 instead of an AttributeError on None.img_processor / None.encode_image.
 """
+
 import importlib.util
 import io
 import threading
@@ -19,9 +20,7 @@ from src.models.clip import MLXClip
 # torch is only needed by the open_clip fallback path; the MLX (mlx_clip) and
 # native SigLIP2 (mlx-embeddings) paths don't. Skip the fallback tests (and
 # import torch locally) so the rest of this suite runs without torch installed.
-requires_torch = pytest.mark.skipif(
-    importlib.util.find_spec("torch") is None, reason="torch not installed"
-)
+requires_torch = pytest.mark.skipif(importlib.util.find_spec("torch") is None, reason="torch not installed")
 
 
 def _red_jpeg() -> bytes:
@@ -44,7 +43,7 @@ class _FakeMLXModel:
         self._first = True
 
     def img_processor(self, images):
-        if self._first and self._started is not None:
+        if self._first and self._started is not None and self._proceed is not None:
             self._first = False
             self._started.set()
             self._proceed.wait(5)
@@ -91,7 +90,7 @@ def test_encode_image_concurrent_unload_raises_clean_error():
     def worker():
         try:
             result["value"] = clip.encode_image(_red_jpeg())
-        except BaseException as e:  # noqa: BLE001 - capture whatever escapes
+        except BaseException as e:
             result["error"] = e
 
     t = threading.Thread(target=worker)
@@ -166,7 +165,7 @@ class _FakeSiglip2Processor:
         self._first = True
 
     def __call__(self, images=None, text=None, **kwargs):
-        if self._first and self._started is not None:
+        if self._first and self._started is not None and self._proceed is not None:
             self._first = False
             self._started.set()
             self._proceed.wait(5)
@@ -271,7 +270,7 @@ def test_encode_image_siglip2_concurrent_unload_raises_clean_error(monkeypatch):
     def worker():
         try:
             result["value"] = clip.encode_image(_red_jpeg())
-        except BaseException as e:  # noqa: BLE001 - capture whatever escapes
+        except BaseException as e:
             result["error"] = e
 
     t = threading.Thread(target=worker)

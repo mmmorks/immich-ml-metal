@@ -12,6 +12,7 @@ resolution logic (no weights, no network):
   * resolve_siglip2_source prefers the explicit ML_SIGLIP2_MLX_PATH override,
     then a complete cache dir, then falls back to the HF repo id.
 """
+
 import re
 from pathlib import Path
 
@@ -292,9 +293,7 @@ def test_ensure_downloads_pre_converted_before_converting(hf_repo_set, monkeypat
 
     path, source = ensure_siglip2_source(REPO)
     assert (source, path) == ("cache", str(cache))
-    assert dl_calls == [
-        {"repo_id": "acme/siglip2-so400m-patch16-384", "local_dir": str(cache)}
-    ]
+    assert dl_calls == [{"repo_id": "acme/siglip2-so400m-patch16-384", "local_dir": str(cache)}]
     assert conv_calls == [], "download succeeded, so no local convert"
 
 

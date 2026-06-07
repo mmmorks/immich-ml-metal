@@ -14,6 +14,7 @@ Covers two edge bugs:
 The script imports ``mlx.core`` and ``embedding_parity`` at module top, so these
 need the ml venv (``.venv/bin/python -m pytest``).
 """
+
 import importlib.util
 import json
 import sys
@@ -35,12 +36,16 @@ def _load_module():
 mod = _load_module()
 
 
-def _result(key, *, disk=1_000_000, peak=1_000_000, img_cos=1.0, txt_cos=1.0,
-            top1=1.0, error=None):
+def _result(key, *, disk=1_000_000, peak=1_000_000, img_cos=1.0, txt_cos=1.0, top1=1.0, error=None):
     """Build a Result that clears recommend()'s gates by default."""
     r = mod.Result(
-        key=key, note="", disk_bytes=disk, peak_mem_bytes=peak,
-        img_ms=1.0, txt_ms=1.0, error=error,
+        key=key,
+        note="",
+        disk_bytes=disk,
+        peak_mem_bytes=peak,
+        img_ms=1.0,
+        txt_ms=1.0,
+        error=error,
     )
     if error is None and key != "fp16":
         stat = {"min": img_cos, "mean": img_cos, "median": img_cos}
@@ -93,12 +98,17 @@ def test_ensure_convert_strips_skip_vision_on_reuse(tmp_path, monkeypatch):
     out = out_root / f"{base_name}-{cfg.key}"
     out.mkdir(parents=True)
     # An interrupted/older convert left skip_vision in the vision_config.
-    (out / "config.json").write_text(json.dumps({
-        "vision_config": {"num_hidden_layers": 27, "skip_vision": True},
-    }))
+    (out / "config.json").write_text(
+        json.dumps(
+            {
+                "vision_config": {"num_hidden_layers": 27, "skip_vision": True},
+            }
+        )
+    )
 
     # ensure_convert imports these from src.models.clip at call time.
     import src.models.clip as clip_mod
+
     monkeypatch.setattr(clip_mod, "siglip2_cache_dir", lambda repo: out_root / base_name)
     monkeypatch.setattr(clip_mod, "siglip2_dir_is_complete", lambda p: True)
 
@@ -114,10 +124,14 @@ def test_ensure_convert_strips_skip_vision_on_reuse(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- #
 def test_strip_skip_vision_key_removes_then_is_idempotent(tmp_path):
     cfg_path = tmp_path / "config.json"
-    cfg_path.write_text(json.dumps({
-        "vision_config": {"num_hidden_layers": 27, "skip_vision": True},
-        "text_config": {"hidden_size": 1152},
-    }))
+    cfg_path.write_text(
+        json.dumps(
+            {
+                "vision_config": {"num_hidden_layers": 27, "skip_vision": True},
+                "text_config": {"hidden_size": 1152},
+            }
+        )
+    )
 
     mod._strip_skip_vision_key(tmp_path)
     after_first = json.loads(cfg_path.read_text())
