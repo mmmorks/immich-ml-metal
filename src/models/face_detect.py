@@ -13,6 +13,36 @@ from PIL import Image
 
 logger = logging.getLogger(__name__)
 
+# Nose-anchor reconstruction strategy for the ArcFace 5-point landmarks (ml-eo4).
+# Apple Vision gives a nose *contour*, not a single tip, so we pick one anchor:
+#   "tip"    — the last contour point. Production default; matches the index the
+#              library was built with (ml-7j8.13 verified PRESERVE on frontal LFW).
+#   "center" — the contour centroid (mean). More robust where the last contour
+#              point swings off the tip on non-frontal/occluded poses; the
+#              candidate ml-eo4 evaluates for drift before any adoption.
+NOSE_STRATEGIES = ("tip", "center")
+DEFAULT_NOSE_STRATEGY = "tip"
+
+
+def _select_nose_point(nose_points, nose_strategy: str = DEFAULT_NOSE_STRATEGY):
+    """Pick the nose anchor from the Vision nose-contour points.
+
+    ``nose_points`` are Vision ``normalizedPoints`` (objects with ``.x``/``.y``,
+    in face-bbox-relative coords). Returns ``(norm_x, norm_y)`` in that same
+    space — the caller maps it to image pixels — or ``None`` if the contour is
+    empty. Raises ``ValueError`` for an unknown strategy (fail loud rather than
+    silently aligning on the wrong point).
+    """
+    if not nose_points:
+        return None
+    if nose_strategy == "tip":
+        p = nose_points[-1]
+        return (p.x, p.y)
+    if nose_strategy == "center":
+        n = len(nose_points)
+        return (sum(p.x for p in nose_points) / n, sum(p.y for p in nose_points) / n)
+    raise ValueError(f"unknown nose_strategy {nose_strategy!r}; expected one of {NOSE_STRATEGIES}")
+
 
 def _clamp(value: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, value))
@@ -47,12 +77,15 @@ def _vision_bbox_to_pixels(
     return {"x1": int(x1), "y1": int(y1), "x2": int(x2), "y2": int(y2)}
 
 
-def detect_faces(image_bytes: bytes) -> tuple[list[dict], int, int]:
+def detect_faces(image_bytes: bytes, nose_strategy: str = DEFAULT_NOSE_STRATEGY) -> tuple[list[dict], int, int]:
     """
     Detect faces using Apple's Vision framework.
 
     Args:
         image_bytes: Raw image data (JPEG, PNG, etc.)
+        nose_strategy: Nose-anchor reconstruction for the 5-point landmarks
+            ("tip" = last nose-contour point, the production default; "center" =
+            nose-contour centroid — the ml-eo4 drift-evaluation variant).
 
     Returns:
         Tuple of (faces, image_width, image_height)
@@ -71,12 +104,14 @@ def detect_faces(image_bytes: bytes) -> tuple[list[dict], int, int]:
     # Use autorelease pool to prevent memory accumulation in long-running service
     pool = NSAutoreleasePool.alloc().init()
     try:
-        return _detect_faces_impl(image_bytes, img_width, img_height)
+        return _detect_faces_impl(image_bytes, img_width, img_height, nose_strategy)
     finally:
         del pool
 
 
-def _detect_faces_impl(image_bytes: bytes, img_width: int, img_height: int) -> tuple[list[dict], int, int]:
+def _detect_faces_impl(
+    image_bytes: bytes, img_width: int, img_height: int, nose_strategy: str = DEFAULT_NOSE_STRATEGY
+) -> tuple[list[dict], int, int]:
     """Internal face detection implementation (assumes autorelease pool is active)."""
     try:
         ns_data = NSData.dataWithBytes_length_(image_bytes, len(image_bytes))
@@ -113,7 +148,7 @@ def _detect_faces_impl(image_bytes: bytes, img_width: int, img_height: int) -> t
 
             landmarks = observation.landmarks()
             if landmarks:
-                five_points = extract_five_point_landmarks(landmarks, bbox, img_width, img_height)
+                five_points = extract_five_point_landmarks(landmarks, bbox, img_width, img_height, nose_strategy)
                 if five_points is not None:
                     face_data["landmarks"] = five_points
 
@@ -127,12 +162,18 @@ def _detect_faces_impl(image_bytes: bytes, img_width: int, img_height: int) -> t
         return [], img_width, img_height
 
 
-def extract_five_point_landmarks(landmarks: "Vision.VNFaceLandmarks2D", face_bbox, img_width: int, img_height: int) -> list[list[float]] | None:
+def extract_five_point_landmarks(
+    landmarks: "Vision.VNFaceLandmarks2D",
+    face_bbox,
+    img_width: int,
+    img_height: int,
+    nose_strategy: str = DEFAULT_NOSE_STRATEGY,
+) -> list[list[float]] | None:
     """
     Extract 5 landmark points for ArcFace alignment:
     - Left eye center
     - Right eye center
-    - Nose tip
+    - Nose anchor (``nose_strategy``: "tip" = last contour point, "center" = centroid)
     - Left mouth corner
     - Right mouth corner
 
@@ -203,12 +244,11 @@ def extract_five_point_landmarks(landmarks: "Vision.VNFaceLandmarks2D", face_bbo
         # Right eye center
         right_eye = get_region_center(landmarks.rightEye())
 
-        # Nose tip - use last point of nose region
+        # Nose anchor - tip (last contour point) or centroid, per nose_strategy
         nose = None
-        nose_points = get_region_points(landmarks.nose())
-        if nose_points:
-            p = nose_points[-1]
-            nose = landmark_to_image_coords(p.x, p.y)
+        nose_anchor = _select_nose_point(get_region_points(landmarks.nose()), nose_strategy)
+        if nose_anchor is not None:
+            nose = landmark_to_image_coords(*nose_anchor)
 
         # Mouth corners - find leftmost and rightmost points by x-coordinate
         # (Vision framework doesn't guarantee point ordering in contours)
