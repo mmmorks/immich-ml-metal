@@ -15,6 +15,34 @@ import Vision
 logger = logging.getLogger(__name__)
 
 
+def normalized_bbox_to_box(
+    origin_x: float,
+    origin_y: float,
+    width: float,
+    height: float,
+    img_width: int,
+    img_height: int,
+) -> list[int]:
+    """Convert a Vision bounding box to Immich's 8-coordinate quadrilateral.
+
+    Vision returns normalized coordinates with the origin at the bottom-left,
+    so the Y axis is flipped to Immich's top-left-origin pixel space. The
+    result is the four corners (as ints) ordered clockwise starting top-left:
+    ``[x1, y1, x2, y2, x3, y3, x4, y4]`` = TL, TR, BR, BL.
+    """
+    x = origin_x * img_width
+    y = (1.0 - origin_y - height) * img_height
+    w = width * img_width
+    h = height * img_height
+
+    x1, y1 = int(x), int(y)          # top-left
+    x2, y2 = int(x + w), int(y)      # top-right
+    x3, y3 = int(x + w), int(y + h)  # bottom-right
+    x4, y4 = int(x), int(y + h)      # bottom-left
+
+    return [x1, y1, x2, y2, x3, y3, x4, y4]
+
+
 def recognize_text(
     image_bytes: bytes,
     min_confidence: float = 0.0,
@@ -115,21 +143,19 @@ def _recognize_text_impl(
             
             # Get bounding box (normalized coordinates, origin at bottom-left)
             bbox = observation.boundingBox()
-            
-            # Convert to pixel coordinates (flip Y axis)
-            x = bbox.origin.x * img_width
-            y = (1.0 - bbox.origin.y - bbox.size.height) * img_height
-            w = bbox.size.width * img_width
-            h = bbox.size.height * img_height
-            
-            # Immich expects 8 coordinates per box (quadrilateral corners)
-            # Order: top-left, top-right, bottom-right, bottom-left (clockwise)
-            x1, y1 = int(x), int(y)              # top-left
-            x2, y2 = int(x + w), int(y)          # top-right
-            x3, y3 = int(x + w), int(y + h)      # bottom-right
-            x4, y4 = int(x), int(y + h)          # bottom-left
-            
-            boxes.extend([x1, y1, x2, y2, x3, y3, x4, y4])
+
+            # Immich expects 8 coordinates per box (quadrilateral corners,
+            # clockwise from top-left) in top-left-origin pixel space.
+            boxes.extend(
+                normalized_bbox_to_box(
+                    bbox.origin.x,
+                    bbox.origin.y,
+                    bbox.size.width,
+                    bbox.size.height,
+                    img_width,
+                    img_height,
+                )
+            )
             
             # Box score uses observation confidence (detection confidence)
             box_scores.append(observation_confidence)

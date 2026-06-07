@@ -60,6 +60,31 @@ OPENCLIP_MAP = {
 }
 
 
+def resolve_fallback_arch(model_name: str) -> tuple[str, str]:
+    """Resolve an Immich CLIP model name to an open_clip ``(arch, pretrained)``.
+
+    Resolution order:
+    1. Exact match in ``OPENCLIP_MAP``.
+    2. ``arch__pretrained`` split on the first ``__``. For the OpenAI weights,
+       open_clip expects the quickgelu variant, so ``-quickgelu`` is appended
+       unless the arch already carries it (or is a SigLIP arch, which has no
+       quickgelu variant).
+    3. Anything else falls back to ``ViT-B-32-quickgelu`` / ``openai``.
+    """
+    if model_name in OPENCLIP_MAP:
+        return OPENCLIP_MAP[model_name]
+    if "__" in model_name:
+        arch, pretrained = model_name.split("__", 1)
+        if (
+            pretrained == "openai"
+            and "quickgelu" not in arch.lower()
+            and "siglip" not in arch.lower()
+        ):
+            arch = arch + "-quickgelu"
+        return arch, pretrained
+    return "ViT-B-32-quickgelu", "openai"
+
+
 class MLXClip:
     """CLIP model using MLX for Apple Silicon acceleration."""
 
@@ -165,19 +190,7 @@ class MLXClip:
                 "Install one with: pip install open-clip-torch"
             ) from e
 
-        if self.model_name in OPENCLIP_MAP:
-            arch, pretrained = OPENCLIP_MAP[self.model_name]
-        elif "__" in self.model_name:
-            arch, pretrained = self.model_name.split("__", 1)
-            if (
-                pretrained == "openai"
-                and "quickgelu" not in arch.lower()
-                and "siglip" not in arch.lower()
-            ):
-                arch = arch + "-quickgelu"
-        else:
-            arch = "ViT-B-32-quickgelu"
-            pretrained = "openai"
+        arch, pretrained = resolve_fallback_arch(self.model_name)
 
         logger.info(f"Loading open_clip model: {arch} / {pretrained}")
 
