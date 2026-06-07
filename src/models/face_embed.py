@@ -91,6 +91,17 @@ def _find_recognition_model(model_dir: Path) -> Optional[Path]:
     return None
 
 
+def _onnx_tensor_shape(value_info) -> list[Optional[int]]:
+    """Extract a tensor's static dims from an ONNX ValueInfoProto.
+
+    Dynamic dimensions (``dim_param``) become ``None``; fixed ones their int.
+    """
+    dims: list[Optional[int]] = []
+    for d in value_info.type.tensor_type.shape.dim:
+        dims.append(d.dim_value if d.HasField("dim_value") else None)
+    return dims
+
+
 def _validate_recognition_model(model_path: Path) -> bool:
     """
     Validate that an ONNX model is an ArcFace recognition model.
@@ -98,29 +109,36 @@ def _validate_recognition_model(model_path: Path) -> bool:
     Checks:
     - Input shape compatible with (batch, 3, 112, 112)
     - Output shape compatible with (batch, 512)
+
+    Reads shapes straight from the ONNX graph metadata (onnx.load parses the
+    protobuf only) rather than constructing a full InferenceSession — the model
+    we accept here is loaded again by model_zoo.get_model, so spinning a session
+    just to read shapes loaded every candidate model twice.
     """
     try:
-        import onnxruntime as ort
+        import onnx
 
-        # Quick session just to check metadata
-        sess = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
+        model = onnx.load(str(model_path), load_external_data=False)
+        graph = model.graph
 
-        # Check input shape
-        input_info = sess.get_inputs()[0]
-        input_shape = input_info.shape
+        # Exclude initializers (weights) that older ONNX exports also list as
+        # graph inputs, so input[0] is the actual image tensor.
+        initializers = {init.name for init in graph.initializer}
+        data_inputs = [i for i in graph.input if i.name not in initializers]
+        if not data_inputs or not graph.output:
+            return False
+
+        input_shape = _onnx_tensor_shape(data_inputs[0])
         # Shape could be [batch, 3, 112, 112] or with dynamic batch
         if len(input_shape) != 4:
             return False
-        # Check spatial dimensions (indices 2 and 3)
+        # Check spatial dimensions (indices 2 and 3) and channels (index 1)
         if input_shape[2] != ARCFACE_INPUT_SIZE or input_shape[3] != ARCFACE_INPUT_SIZE:
             return False
-        # Check channels (index 1)
         if input_shape[1] != 3:
             return False
 
-        # Check output shape
-        output_info = sess.get_outputs()[0]
-        output_shape = output_info.shape
+        output_shape = _onnx_tensor_shape(graph.output[0])
         if len(output_shape) != 2:
             return False
         # Check embedding dimension (index 1)

@@ -7,6 +7,24 @@ import logging
 
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 
+_VALID_LOG_LEVELS: frozenset[str] = frozenset(
+    ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+)
+
+
+def _normalize_log_level(raw: str) -> LogLevel:
+    """Coerce a user-supplied log level to a valid one, defaulting to INFO.
+
+    An invalid ML_LOG_LEVEL would otherwise crash configure_logging() at
+    getattr(logging, level) — guard it at the source so the stored value is
+    always a real logging level.
+    """
+    level = raw.upper()
+    if level not in _VALID_LOG_LEVELS:
+        logging.warning("Invalid ML_LOG_LEVEL %r; falling back to INFO", raw)
+        return "INFO"
+    return level  # type: ignore[return-value]
+
 
 @dataclass
 class Settings:
@@ -67,15 +85,18 @@ class Settings:
             max_concurrent_requests=int(os.getenv("ML_MAX_CONCURRENT_REQUESTS", "4")),
             max_image_size=int(os.getenv("ML_MAX_IMAGE_SIZE", str(50 * 1024 * 1024))),
             request_timeout=int(os.getenv("ML_REQUEST_TIMEOUT", "120")),
-            log_level=os.getenv("ML_LOG_LEVEL", "INFO").upper(),
+            log_level=_normalize_log_level(os.getenv("ML_LOG_LEVEL", "INFO")),
             log_requests=os.getenv("ML_LOG_REQUESTS", "true").lower() == "true",
             debug_mode=os.getenv("ML_DEBUG_MODE", "false").lower() == "true",
         )
     
     def configure_logging(self):
         """Configure logging based on settings."""
+        level = getattr(logging, self.log_level, logging.INFO)
+        if not isinstance(level, int):
+            level = logging.INFO
         logging.basicConfig(
-            level=getattr(logging, self.log_level),
+            level=level,
             format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
         )
 

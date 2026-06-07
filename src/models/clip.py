@@ -97,7 +97,7 @@ class MLXClip:
         self._repo_id = MODEL_MAP.get(model_name, MODEL_MAP.get("default"))
         # Use the global metal_lock — Vision framework also touches Metal
         # and concurrent MLX + Vision Metal access crashes the process.
-        from src.gpu_lock import metal_lock
+        from ..gpu_lock import metal_lock
 
         self._inference_lock = metal_lock
         self._load_model()
@@ -228,6 +228,48 @@ class MLXClip:
             f"Successfully loaded CLIP model via open_clip: {arch}/{pretrained}"
         )
 
+    def _infer_with_swap_retry(self, label: str, prepare, run):
+        """Shared scaffolding for every encode path.
+
+        ``prepare(model_ref)`` runs OUTSIDE the inference lock (CPU-only image
+        preprocessing / tokenization). ``run(model_ref, prepared)`` runs INSIDE
+        the lock (GPU inference) and returns its result — any cheap host-side
+        post-processing should be done by the caller on the returned value so
+        the lock is held only for Metal/MPS work.
+
+        A reference to the model is captured before ``prepare`` and re-checked
+        after acquiring the lock, so a concurrent ``get_clip_model()`` swap
+        (which can set ``self._model`` to ``None`` or a different instance) is
+        caught instead of crashing on ``None``. On a swap detected mid-flight,
+        the work is retried once against the current model.
+        """
+        for attempt in range(2):
+            model_ref = self._model
+            if model_ref is None:
+                # A concurrent get_clip_model() switched models and unloaded
+                # the instance we still hold (self._model -> None). Bail out
+                # cleanly instead of crashing on a None attribute access.
+                raise RuntimeError(
+                    "CLIP model was unloaded during a concurrent model switch"
+                )
+            prepared = prepare(model_ref)
+
+            with self._inference_lock:
+                if self._model is not model_ref:
+                    if attempt == 0:
+                        logger.warning(
+                            "CLIP model changed during %s, retrying", label
+                        )
+                        continue
+                    raise RuntimeError(
+                        f"CLIP model changed during {label} after retry"
+                    )
+                return run(model_ref, prepared)
+
+        # Should never reach here — range(2) always runs and either
+        # returns or raises. Defensive guard.
+        raise RuntimeError(f"CLIP {label} failed to produce an embedding")
+
     def encode_image(self, image_bytes: bytes) -> np.ndarray:
         """
         Generate CLIP embedding for an image.
@@ -251,46 +293,22 @@ class MLXClip:
             return self._encode_image_fallback(image)
 
         # MLX path — preprocess the PIL image directly (no temp file needed).
-        # Capture model reference before preprocessing so we can detect
-        # if the model was swapped between preprocessing and inference.
-        # One retry: if a concurrent request switched models between
-        # preprocessing and lock acquisition, re-preprocess with the
-        # current model and try once more.
-        for attempt in range(2):
-            model_ref = self._model
-            if model_ref is None:
-                # A concurrent get_clip_model() switched models and unloaded
-                # the instance we still hold (self._model -> None). Bail out
-                # cleanly instead of crashing on None.img_processor.
-                raise RuntimeError(
-                    "CLIP model was unloaded during a concurrent model switch"
-                )
-            processed = model_ref.img_processor([image])
+        def prepare(model_ref):
+            return model_ref.img_processor([image])
 
-            with self._inference_lock:
-                if self._model is not model_ref:
-                    if attempt == 0:
-                        logger.warning(
-                            "CLIP model changed during preprocessing, retrying"
-                        )
-                        continue
-                    raise RuntimeError(
-                        "CLIP model changed during preprocessing after retry"
-                    )
-                output = self._model.model(**{"pixel_values": processed})
-                embedding = output.image_embeds[0]
-                # Force Metal evaluation inside the lock — MLX arrays are lazy,
-                # and Metal work must complete before releasing the lock so
-                # Vision framework calls don't collide with in-flight Metal ops.
-                if isinstance(embedding, mx.array):
-                    embedding = np.array(embedding)
+        def run(model_ref, processed):
+            output = model_ref.model(**{"pixel_values": processed})
+            embedding = output.image_embeds[0]
+            # Force Metal evaluation inside the lock — MLX arrays are lazy,
+            # and Metal work must complete before releasing the lock so
+            # Vision framework calls don't collide with in-flight Metal ops.
+            if isinstance(embedding, mx.array):
+                embedding = np.array(embedding)
+            return embedding
 
-            embedding = embedding / np.linalg.norm(embedding)
-            return embedding.flatten().astype(np.float32)
-
-        # Should never reach here — range(2) always runs and either
-        # returns or raises. Defensive guard.
-        raise RuntimeError("CLIP encode_image failed to produce an embedding")
+        embedding = self._infer_with_swap_retry("preprocessing", prepare, run)
+        embedding = embedding / np.linalg.norm(embedding)
+        return embedding.flatten().astype(np.float32)
 
     def _encode_image_fallback(self, image: Image.Image) -> np.ndarray:
         """Encode image using open_clip fallback.
@@ -302,34 +320,21 @@ class MLXClip:
         """
         import torch
 
-        for attempt in range(2):
-            model_ref = self._model
-            if model_ref is None:
-                raise RuntimeError(
-                    "CLIP model was unloaded during a concurrent model switch"
-                )
-            image_tensor = self._processor(image).unsqueeze(0).to(self._device)
+        def prepare(model_ref):
+            return self._processor(image).unsqueeze(0).to(self._device)
 
-            with self._inference_lock:
-                if self._model is not model_ref:
-                    if attempt == 0:
-                        logger.warning(
-                            "CLIP model changed during preprocessing (fallback), retrying"
-                        )
-                        continue
-                    raise RuntimeError(
-                        "CLIP model changed during preprocessing after retry"
-                    )
-                with torch.no_grad():
-                    embedding = self._model.encode_image(image_tensor)
-                    embedding = embedding / embedding.norm(dim=-1, keepdim=True)
+        def run(model_ref, image_tensor):
+            with torch.no_grad():
+                embedding = model_ref.encode_image(image_tensor)
+                return embedding / embedding.norm(dim=-1, keepdim=True)
 
-            # .cpu() triggers MPS device sync — safe outside the lock
-            # because MPS uses its own command queue (unlike MLX which
-            # shares the Metal command buffer with Vision framework).
-            return embedding.squeeze().cpu().numpy().astype(np.float32)
-
-        raise RuntimeError("CLIP encode_image_fallback failed to produce an embedding")
+        embedding = self._infer_with_swap_retry(
+            "preprocessing (fallback)", prepare, run
+        )
+        # .cpu() triggers MPS device sync — safe outside the lock because MPS
+        # uses its own command queue (unlike MLX which shares the Metal command
+        # buffer with Vision framework).
+        return embedding.squeeze().cpu().numpy().astype(np.float32)
 
     def _encode_image_siglip2(self, image: Image.Image) -> np.ndarray:
         """Encode image via the native MLX SigLIP2 backend (mlx-embeddings).
@@ -341,35 +346,21 @@ class MLXClip:
         encode_image. get_image_features returns an un-normalized (1, 1152)
         pooled output, so we L2-normalize manually.
         """
-        for attempt in range(2):
-            model_ref = self._model
-            processor_ref = self._processor
-            if model_ref is None:
-                raise RuntimeError(
-                    "CLIP model was unloaded during a concurrent model switch"
-                )
-            inputs = processor_ref(images=[image], return_tensors="mlx")
+        def prepare(model_ref):
+            return self._processor(images=[image], return_tensors="mlx")
 
-            with self._inference_lock:
-                if self._model is not model_ref:
-                    if attempt == 0:
-                        logger.warning(
-                            "CLIP model changed during preprocessing (siglip2), retrying"
-                        )
-                        continue
-                    raise RuntimeError(
-                        "CLIP model changed during preprocessing after retry"
-                    )
-                features = model_ref.get_image_features(
-                    pixel_values=inputs["pixel_values"]
-                )
-                # Force Metal evaluation inside the lock — MLX arrays are lazy.
-                embedding = np.array(features[0])
+        def run(model_ref, inputs):
+            features = model_ref.get_image_features(
+                pixel_values=inputs["pixel_values"]
+            )
+            # Force Metal evaluation inside the lock — MLX arrays are lazy.
+            return np.array(features[0])
 
-            embedding = embedding / np.linalg.norm(embedding)
-            return embedding.flatten().astype(np.float32)
-
-        raise RuntimeError("CLIP encode_image_siglip2 failed to produce an embedding")
+        embedding = self._infer_with_swap_retry(
+            "preprocessing (siglip2)", prepare, run
+        )
+        embedding = embedding / np.linalg.norm(embedding)
+        return embedding.flatten().astype(np.float32)
 
     def encode_text(self, text: str) -> np.ndarray:
         """
@@ -406,31 +397,18 @@ class MLXClip:
         """
         import torch
 
-        for attempt in range(2):
-            model_ref = self._model
-            if model_ref is None:
-                raise RuntimeError(
-                    "CLIP model was unloaded during a concurrent model switch"
-                )
-            tokens = self._tokenizer([text]).to(self._device)
+        def prepare(model_ref):
+            return self._tokenizer([text]).to(self._device)
 
-            with self._inference_lock:
-                if self._model is not model_ref:
-                    if attempt == 0:
-                        logger.warning(
-                            "CLIP model changed during tokenization (text fallback), retrying"
-                        )
-                        continue
-                    raise RuntimeError(
-                        "CLIP model changed during tokenization after retry"
-                    )
-                with torch.no_grad():
-                    embedding = self._model.encode_text(tokens)
-                    embedding = embedding / embedding.norm(dim=-1, keepdim=True)
+        def run(model_ref, tokens):
+            with torch.no_grad():
+                embedding = model_ref.encode_text(tokens)
+                return embedding / embedding.norm(dim=-1, keepdim=True)
 
-            return embedding.squeeze().cpu().numpy().astype(np.float32)
-
-        raise RuntimeError("CLIP encode_text_fallback failed to produce an embedding")
+        embedding = self._infer_with_swap_retry(
+            "tokenization (text fallback)", prepare, run
+        )
+        return embedding.squeeze().cpu().numpy().astype(np.float32)
 
     def _encode_text_siglip2(self, text: str) -> np.ndarray:
         """Encode text via the native MLX SigLIP2 backend (mlx-embeddings).
@@ -441,14 +419,8 @@ class MLXClip:
         encode paths. get_text_features returns an un-normalized (1, 1152)
         pooled output, so we L2-normalize manually.
         """
-        for attempt in range(2):
-            model_ref = self._model
-            processor_ref = self._processor
-            if model_ref is None:
-                raise RuntimeError(
-                    "CLIP model was unloaded during a concurrent model switch"
-                )
-            inputs = processor_ref(
+        def prepare(model_ref):
+            return self._processor(
                 text=[text],
                 return_tensors="mlx",
                 padding="max_length",
@@ -456,24 +428,16 @@ class MLXClip:
                 truncation=True,
             )
 
-            with self._inference_lock:
-                if self._model is not model_ref:
-                    if attempt == 0:
-                        logger.warning(
-                            "CLIP model changed during tokenization (siglip2), retrying"
-                        )
-                        continue
-                    raise RuntimeError(
-                        "CLIP model changed during tokenization after retry"
-                    )
-                features = model_ref.get_text_features(input_ids=inputs["input_ids"])
-                # Force Metal evaluation inside the lock — MLX arrays are lazy.
-                embedding = np.array(features[0])
+        def run(model_ref, inputs):
+            features = model_ref.get_text_features(input_ids=inputs["input_ids"])
+            # Force Metal evaluation inside the lock — MLX arrays are lazy.
+            return np.array(features[0])
 
-            embedding = embedding / np.linalg.norm(embedding)
-            return embedding.flatten().astype(np.float32)
-
-        raise RuntimeError("CLIP encode_text_siglip2 failed to produce an embedding")
+        embedding = self._infer_with_swap_retry(
+            "tokenization (siglip2)", prepare, run
+        )
+        embedding = embedding / np.linalg.norm(embedding)
+        return embedding.flatten().astype(np.float32)
 
     def unload(self):
         """Unload model and free memory."""

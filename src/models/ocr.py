@@ -46,19 +46,20 @@ def normalized_bbox_to_box(
 def recognize_text(
     image_bytes: bytes,
     min_confidence: float = 0.0,
-    recognition_level: str = "accurate",
     use_language_correction: bool = True
 ) -> dict:
     """
     Perform OCR using Apple's Vision framework.
-    
+
+    Always uses Vision's "accurate" recognition level (matching Immich, which
+    has no fast-OCR mode).
+
     Args:
         image_bytes: Raw image data (JPEG, PNG, etc.)
         min_confidence: Minimum confidence threshold (0.0 - 1.0)
-        recognition_level: "accurate" or "fast"
         use_language_correction: Enable language correction (better for natural text,
                                  disable for technical text, serial numbers, codes)
-        
+
     Returns:
         Dict matching Immich OCR response format:
         {
@@ -79,8 +80,8 @@ def recognize_text(
     pool = NSAutoreleasePool.alloc().init()
     try:
         return _recognize_text_impl(
-            image_bytes, img_width, img_height, 
-            min_confidence, recognition_level, use_language_correction
+            image_bytes, img_width, img_height,
+            min_confidence, use_language_correction
         )
     finally:
         del pool
@@ -91,7 +92,6 @@ def _recognize_text_impl(
     img_width: int,
     img_height: int,
     min_confidence: float,
-    recognition_level: str,
     use_language_correction: bool
 ) -> dict:
     """Internal OCR implementation (assumes autorelease pool is active)."""
@@ -100,11 +100,7 @@ def _recognize_text_impl(
         handler = Vision.VNImageRequestHandler.alloc().initWithData_options_(ns_data, None)
         request = Vision.VNRecognizeTextRequest.alloc().init()
 
-        if recognition_level == "fast":
-            request.setRecognitionLevel_(Vision.VNRequestTextRecognitionLevelFast)
-        else:
-            request.setRecognitionLevel_(Vision.VNRequestTextRecognitionLevelAccurate)
-
+        request.setRecognitionLevel_(Vision.VNRequestTextRecognitionLevelAccurate)
         request.setUsesLanguageCorrection_(use_language_correction)
 
         # Vision framework is thread-safe with separate handlers.

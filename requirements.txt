@@ -37,6 +37,9 @@ open-clip-torch>=2.24.0
 # Face recognition - official onnxruntime supports Apple Silicon via CoreML
 # onnxruntime 1.18+ supports numpy 2.x
 onnxruntime>=1.18.0
+# onnx proto is used directly to read ArcFace model shapes without an
+# InferenceSession (also a transitive insightface dep; pinned explicitly)
+onnx>=1.16.0
 insightface>=0.7.3
 
 # Development/testing
