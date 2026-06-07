@@ -52,6 +52,18 @@ _model_busy: set[str] = set()  # models currently loading or running inference
 _idle_monitor_started = False
 
 
+def _serialize_embedding(embedding) -> str:
+    """Serialize an embedding (numpy array or list) to a JSON string.
+
+    Use json.dumps everywhere so the face and CLIP paths emit identical,
+    valid JSON. Python's str() of a list emits non-JSON 'nan'/'inf' tokens
+    for a degenerate vector, whereas json.dumps emits NaN/Infinity (parseable
+    by Immich's orjson), so str() is an unsafe latent footgun.
+    """
+    values = embedding.tolist() if hasattr(embedding, "tolist") else embedding
+    return json.dumps(values)
+
+
 def _track_model_use(model_type: str) -> None:
     """Record that a model was just used (call AFTER load/inference, not before)."""
     _model_last_used[model_type] = _time.monotonic()
@@ -340,7 +352,7 @@ def _run_face_recognition_sync(image_bytes: bytes, min_score: float, model_name:
                 results.append(
                     {
                         "boundingBox": face["boundingBox"],
-                        "embedding": str(embedding.tolist()),
+                        "embedding": _serialize_embedding(embedding),
                         "score": face["score"],
                     }
                 )
@@ -546,7 +558,7 @@ async def _process_predict(
                 finally:
                     _track_model_use("clip")
 
-            return ("clip", json.dumps(embedding.tolist()))
+            return ("clip", _serialize_embedding(embedding))
 
         if "textual" in task_config and text:
             model_name = task_config["textual"].get("modelName", settings.clip_model)
@@ -562,7 +574,7 @@ async def _process_predict(
                 finally:
                     _track_model_use("clip")
 
-            return ("clip", json.dumps(embedding.tolist()))
+            return ("clip", _serialize_embedding(embedding))
 
         return None
 
@@ -588,7 +600,7 @@ async def _process_predict(
                         "x2": int(img.width * 0.75),
                         "y2": int(img.height * 0.85),
                     },
-                    "embedding": str(fake_embedding),
+                    "embedding": _serialize_embedding(fake_embedding),
                     "score": 0.99,
                 }
             ]

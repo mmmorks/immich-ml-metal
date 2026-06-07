@@ -203,6 +203,28 @@ async def test_predict_faces(client, test_image_bytes):
     assert "boundingBox" in faces[0]
     assert "embedding" in faces[0]
     assert "score" in faces[0]
+    # The face embedding must be a JSON string (same contract as the CLIP path),
+    # not a Python repr — str(list) emits non-JSON 'nan'/'inf' tokens (ml-7j8.15).
+    face_embedding = json.loads(faces[0]["embedding"])
+    assert isinstance(face_embedding, list)
+    assert len(face_embedding) == 512
+
+
+def test_serialize_embedding_produces_json():
+    import numpy as np
+
+    from src.main import _serialize_embedding
+
+    # numpy array (CLIP/face inference path) and plain list (stub path) must
+    # both round-trip through json.loads to the same values.
+    arr = np.array([1.0, -0.5, 0.25], dtype=np.float32)
+    assert json.loads(_serialize_embedding(arr)) == [1.0, -0.5, 0.25]
+    assert json.loads(_serialize_embedding([1.0, 2.0, 3.0])) == [1.0, 2.0, 3.0]
+
+    # A degenerate vector stays valid JSON (json.dumps emits NaN/Infinity,
+    # which json.loads parses) rather than str()'s un-parseable 'nan'/'inf'.
+    degenerate = json.loads(_serialize_embedding([float("nan"), float("inf")]))
+    assert len(degenerate) == 2 and degenerate[0] != degenerate[0]  # NaN != NaN
 
 
 @pytest.mark.asyncio
