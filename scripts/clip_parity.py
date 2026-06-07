@@ -218,6 +218,62 @@ def embed_openclip_refs(
     return out
 
 
+# Immich CLIP name -> upstream HF repo (ONNX export) + open_clip arch (tokenizer).
+_ONNX_REPO = {
+    "ViT-B-32__openai": ("immich-app/ViT-B-32__openai", "ViT-B-32"),
+    "ViT-B-16__openai": ("immich-app/ViT-B-16__openai", "ViT-B-16-quickgelu"),
+    "ViT-L-14__openai": ("immich-app/ViT-L-14__openai", "ViT-L-14-quickgelu"),
+}
+
+
+def embed_onnx(
+    model_name: str,
+    images: list[tuple[str, bytes]],
+    queries: list[str],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Literal upstream ONNX export (the checkpoint the Immich index was built
+    with) via onnxruntime, fed Immich's exact transform + tokenization.
+
+    Returns (image_embeds [N,D], text_embeds [M,D]), L2-normalized float32.
+    """
+    import onnxruntime as ort
+    from huggingface_hub import hf_hub_download
+
+    import open_clip
+
+    from src.models.immich_preprocess import clean_text, siglip_image_pixels
+
+    if model_name not in _ONNX_REPO:
+        raise SystemExit(f"No ONNX repo mapping for {model_name!r}; add it to _ONNX_REPO.")
+    repo, arch = _ONNX_REPO[model_name]
+    vis_path = hf_hub_download(repo, "visual/model.onnx")
+    txt_path = hf_hub_download(repo, "textual/model.onnx")
+    so = ort.SessionOptions()
+    so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+    vis = ort.InferenceSession(vis_path, so, providers=["CPUExecutionProvider"])
+    txt = ort.InferenceSession(txt_path, so, providers=["CPUExecutionProvider"])
+    vis_in = vis.get_inputs()[0].name
+    txt_in = txt.get_inputs()[0].name
+    tokenizer = open_clip.get_tokenizer(arch)
+
+    def _l2(v: np.ndarray) -> np.ndarray:
+        n = np.linalg.norm(v)
+        return (v / n if n > 0 else v).astype(np.float32)
+
+    img_out = []
+    for _, b in images:
+        pil = Image.open(io.BytesIO(b)).convert("RGB")
+        px = siglip_image_pixels(pil, size=CLIP_IMAGE_SIZE, mean=CLIP_MEAN, std=CLIP_STD).astype(np.float32)
+        img_out.append(_l2(vis.run(None, {vis_in: px})[0][0]))
+    txt_out = []
+    for q in queries:
+        ids = tokenizer([clean_text(q, canonicalize=False)]).numpy().astype(np.int32)
+        txt_out.append(_l2(txt.run(None, {txt_in: ids})[0][0]))
+    del vis, txt
+    gc.collect()
+    return np.stack(img_out), np.stack(txt_out)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", default=DEFAULT_MODEL, help="Immich CLIP model name routed through mlx_clip")
@@ -227,9 +283,9 @@ def main() -> int:
     ap.add_argument(
         "--ref",
         nargs="+",
-        choices=["immich", "openclip"],
-        default=["immich", "openclip"],
-        help="reference variant(s). 'immich'=open_clip weights through Immich's transform (THE GATE); 'openclip'=open_clip's own transform (diagnostic)",
+        choices=["immich", "openclip", "onnx"],
+        default=["onnx", "immich", "openclip"],
+        help="reference variant(s). 'immich'=open_clip weights through Immich's transform (THE GATE); 'openclip'=open_clip's own transform (diagnostic); 'onnx'=literal upstream ONNX (frozen for the golden gate)",
     )
     ap.add_argument("--device", default="cpu", choices=["cpu", "mps"], help="torch device for the reference")
     ap.add_argument("--threshold", type=float, default=0.99, help="cosine gate (applied to immich image+text)")
@@ -260,8 +316,10 @@ def main() -> int:
     print(f"\n[backend] open_clip {arch}/{pretrained} (variants: {args.ref}) ...")
     print("  'immich' = open_clip weights through Immich's transform (gate); 'openclip' = open_clip's own transform")
     refs = embed_openclip_refs(arch, pretrained, images, queries, args.device, args.ref)
-    # Order the report so the gate (immich) is first.
-    refs = {k: refs[k] for k in ("immich", "openclip") if k in refs}
+    if "onnx" in args.ref:
+        refs["onnx"] = embed_onnx(args.model, images, queries)
+    # Order the report so the gate (immich) is prominent.
+    refs = {k: refs[k] for k in ("onnx", "immich", "openclip") if k in refs}
 
     lines: list[str] = []
 
