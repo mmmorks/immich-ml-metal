@@ -104,8 +104,61 @@ def gen_siglip2() -> None:
     )
 
 
-# gen_face() added in a later task.
-GENERATORS = {"openai_clip": gen_openai_clip, "siglip2": gen_siglip2}
+FACE_NUM_IDS = 3
+FACE_MIN_PER_ID = 2
+FACE_MAX_PER_ID = 2
+
+
+def _save_face_fixtures(samples) -> None:
+    """Persist the LFW subset under tests/fixtures/faces/<label>/ (committed)."""
+    root = FIX / "faces"
+    for s in samples:
+        # s.name is "<path>" or "<label>.jpg"; group by identity label.
+        ident = (s.label or "unknown").replace(" ", "_")
+        d = root / ident
+        d.mkdir(parents=True, exist_ok=True)
+        fname = Path(s.name).name
+        (d / fname).write_bytes(s.data)
+
+
+def gen_face() -> None:
+    from face_embedding_parity import load_lfw, top1_accuracy, upstream_embeddings
+
+    samples = load_lfw(FACE_NUM_IDS, FACE_MIN_PER_ID, FACE_MAX_PER_ID)
+    _save_face_fixtures(samples)
+    records = upstream_embeddings(samples)
+    if not records:
+        raise SystemExit("face: upstream pipeline detected zero faces — cannot freeze golden.")
+    emb = np.stack([r["embedding"] for r in records])
+    _check_finite("face", emb)
+    labels = [r["label"] for r in records]
+    img_ids = [r["img_id"] for r in records]
+    bboxes = np.array([r["bbox"] for r in records], dtype=np.float32)
+    # Golden top-1 retrieval accuracy of the upstream embeddings against itself
+    # (same-image excluded) — the test asserts MLX is within 0.02 of this.
+    golden_top1 = top1_accuracy(emb, labels, img_ids, emb, labels, img_ids)
+    _write(
+        "face",
+        {
+            "embeddings": emb,
+            "bboxes": bboxes,
+            "labels": np.array(labels),
+            "img_ids": np.array(img_ids),
+            "golden_top1": np.array(golden_top1, dtype=np.float64),
+        },
+        {
+            "model": "buffalo_l (SCRFD det_10g + ArcFace w600k_r50)",
+            "onnxruntime_version": ort.__version__,
+            "dim": int(emb.shape[1]),
+            "num_faces": len(records),
+            "identities": sorted({r["label"] for r in records}),
+            "golden_top1_accuracy": float(golden_top1),
+            "generated": date.today().isoformat(),
+        },
+    )
+
+
+GENERATORS = {"openai_clip": gen_openai_clip, "siglip2": gen_siglip2, "face": gen_face}
 
 
 def main() -> int:
