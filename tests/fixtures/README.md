@@ -11,7 +11,14 @@ Public-domain photos for CLIP image parity. Provenance per file:
 
 | file | source URL | license |
 |------|------------|---------|
-| (filled by scripts/fetch_pd_clip_fixtures.py) | | |
+| earth_blue_marble.jpg | https://images-assets.nasa.gov/image/PIA18033/PIA18033~orig.jpg | NASA — public domain |
+| apollo17_moon.jpg | https://images-assets.nasa.gov/image/as17-148-22727/as17-148-22727~orig.jpg | NASA — public domain |
+| nebula_hubble.jpg | https://images-assets.nasa.gov/image/GSFC_20171208_Archive_e000075/GSFC_20171208_Archive_e000075~orig.jpg | NASA — public domain |
+| astronaut_spacewalk.jpg | https://images-assets.nasa.gov/image/iss040e090540/iss040e090540~orig.jpg | NASA — public domain |
+| mars_curiosity.jpg | https://images-assets.nasa.gov/image/PIA16239/PIA16239~orig.jpg | NASA — public domain |
+| nasa_pia12348.jpg | https://images-assets.nasa.gov/image/PIA12348/PIA12348~orig.jpg | NASA — public domain |
+| nasa_pia17011.jpg | https://images-assets.nasa.gov/image/PIA17011/PIA17011~orig.jpg | NASA — public domain |
+| nasa_pia03883.jpg | https://images-assets.nasa.gov/image/PIA03883/PIA03883~orig.jpg | NASA — public domain |
 
 ## faces/
 LFW subset for face parity (identity subdirectories, ≥2 images each).
