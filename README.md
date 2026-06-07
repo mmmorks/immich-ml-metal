@@ -167,11 +167,26 @@ interchangeable with the index Immich already built, so **no re-index is needed*
 - **Verified end-to-end** against a live Immich smart-search workload: 1152-dim,
   `L2 == 1.0`, warm latency ~50 ms text / ~110 ms image.
 
-Weights load directly from the HF bf16 safetensors on first use (cached under
-`~/.cache/huggingface`); no separate conversion step. A pre-converted local
-weights directory may be supplied via `ML_SIGLIP2_MLX_PATH` — its directory name
-**must** contain a `patchNN-NNN` token (e.g. `patch16-384`), because the
-mlx-embeddings loader regex-parses the patch size from the path.
+**Weight loading & caching.** Out of the box, weights load directly from the HF
+bf16 safetensors on first use (cached under `~/.cache/huggingface`) — no setup
+required. For a smaller, faster-loading install you can pre-convert once to fp16
+(~2.2 GB vs 4.3 GB bf16):
+
+```bash
+.venv/bin/python scripts/convert_siglip2_mlx.py --verify
+```
+
+This writes to the repo's gitignored `models/` dir, and the accelerator
+**auto-loads from there** with no further configuration. Resolution order is:
+
+1. `ML_SIGLIP2_MLX_PATH` — explicit pre-converted dir (highest precedence).
+2. The local cache dir (`models/siglip2-so400m-patch16-384`, or
+   `$ML_MODEL_CACHE_DIR/...`) if a complete convert exists there.
+3. The HF repo bf16 safetensors (default fallback).
+
+Any local weights directory name **must** contain a `patchNN-NNN` token (e.g.
+`patch16-384`), because the mlx-embeddings loader regex-parses the patch size
+from the path; the convert script enforces this.
 
 ### The open_clip fallback
 

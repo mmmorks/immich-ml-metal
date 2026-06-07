@@ -9,10 +9,12 @@ import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
 from PIL import Image
+from pathlib import Path
 from typing import Optional
 import io
 import gc
 import logging
+import os
 import threading
 
 from src.models.immich_preprocess import siglip_image_pixels
@@ -48,6 +50,72 @@ MODEL_MAP = {
 MLX_EMBEDDINGS_MAP = {
     "ViT-SO400M-16-SigLIP2-384__webli": "google/siglip2-so400m-patch16-384",
 }
+
+
+# --- Local converted-weight cache (ml-ycd.7) ---------------------------------
+#
+# The native SigLIP2 backend can load the HF bf16 safetensors directly, but a
+# one-time fp16 convert (scripts/convert_siglip2_mlx.py) is ~2.2 GB and avoids
+# re-downloading/re-converting on every install. The accelerator auto-prefers a
+# complete local convert over the HF repo, with an explicit override on top.
+
+# Files a converted dir must contain to be usable. *.safetensors is checked
+# separately (glob) since the shard count/name varies.
+_SIGLIP2_REQUIRED_FILES = ("config.json", "tokenizer.json")
+
+
+def _ml_model_cache_root() -> Path:
+    """Root dir for locally-converted/cached MLX weights.
+
+    Defaults to the repo's gitignored ``models/`` dir (see .gitignore); override
+    with ``ML_MODEL_CACHE_DIR`` for installs outside the source tree.
+    """
+    env = os.getenv("ML_MODEL_CACHE_DIR")
+    if env:
+        return Path(env).expanduser()
+    # src/models/clip.py -> parents[2] == ml repo root
+    return Path(__file__).resolve().parents[2] / "models"
+
+
+def siglip2_cache_dir(repo_id: str) -> Path:
+    """Default local cache dir for a converted SigLIP2 repo.
+
+    The dir name is the repo basename, which for the supported model keeps the
+    'patchNN-NNN' token the mlx-embeddings loader regex requires (ml-ycd.1) —
+    config.json omits patch_size, so the path string is the only source.
+    """
+    return _ml_model_cache_root() / repo_id.split("/")[-1]
+
+
+def siglip2_dir_is_complete(path) -> bool:
+    """True if ``path`` holds a usable converted model.
+
+    Requires config.json, tokenizer.json, and at least one ``*.safetensors`` so a
+    half-written/aborted convert is ignored rather than loaded and crashing.
+    """
+    p = Path(path)
+    if not p.is_dir():
+        return False
+    if not all((p / f).is_file() for f in _SIGLIP2_REQUIRED_FILES):
+        return False
+    return any(p.glob("*.safetensors"))
+
+
+def resolve_siglip2_source(repo_id: str) -> tuple[str, str]:
+    """Resolve where to load SigLIP2 weights from, preferring local converts.
+
+    Order: explicit ``ML_SIGLIP2_MLX_PATH`` override > a complete default cache
+    dir (``siglip2_cache_dir``) > the HF repo id (bf16 safetensors, downloaded +
+    cached by HF on first use). Returns ``(path_or_repo, source)`` where source
+    is ``'override' | 'cache' | 'hf'``.
+    """
+    override = os.getenv("ML_SIGLIP2_MLX_PATH")
+    if override:
+        return override, "override"
+    cache = siglip2_cache_dir(repo_id)
+    if siglip2_dir_is_complete(cache):
+        return str(cache), "cache"
+    return repo_id, "hf"
 
 # open_clip model name mappings for fallback
 OPENCLIP_MAP = {
@@ -159,18 +227,18 @@ class MLXClip:
         get_image_features / get_text_features (single-modality, un-normalized)
         — NOT Model.__call__, which requires both modalities (see ml-ycd.1).
         """
-        import os
-
         from mlx_embeddings.utils import load
 
         repo = MLX_EMBEDDINGS_MAP[self.model_name]
-        # Seam for ml-ycd.7: a pre-converted local weights dir may be supplied
-        # via ML_SIGLIP2_MLX_PATH. Its name must still contain 'patchNN-NNN'.
-        override = os.getenv("ML_SIGLIP2_MLX_PATH")
-        path_or_repo = override or repo
+        # ml-ycd.7: prefer a local fp16 convert over the HF bf16 download.
+        # resolve_siglip2_source picks (in order) the ML_SIGLIP2_MLX_PATH
+        # override, a complete cache dir, else the HF repo id. Any local dir
+        # name must still contain 'patchNN-NNN' (the loader regex needs it).
+        path_or_repo, source = resolve_siglip2_source(repo)
 
         logger.info(
-            f"Loading SigLIP2 via mlx-embeddings: {self.model_name} -> {path_or_repo}"
+            f"Loading SigLIP2 via mlx-embeddings: {self.model_name} -> "
+            f"{path_or_repo} (source={source})"
         )
         self._model, self._processor = load(path_or_repo)
         self._repo_id = path_or_repo
@@ -183,8 +251,9 @@ class MLXClip:
         # (override) or the HF repo snapshot.
         from src.models.immich_preprocess import SiglipTextTokenizer
 
-        if override and os.path.isdir(override):
-            tokenizer_json = os.path.join(override, "tokenizer.json")
+        if os.path.isdir(path_or_repo):
+            # Local override or cache dir — convert() copies tokenizer.json in.
+            tokenizer_json = os.path.join(path_or_repo, "tokenizer.json")
         else:
             from huggingface_hub import hf_hub_download
 
