@@ -156,8 +156,16 @@ def _start_idle_monitor() -> None:
 
 # Dedicated thread pool for ML inference — reuses threads instead of
 # creating a new one per asyncio.to_thread() call.
+#
+# A single request fans out one pool job per task type (CLIP, facial-recognition,
+# OCR), so up to MAX_TASKS_PER_REQUEST jobs run concurrently for one request. The
+# request semaphore caps concurrent *requests* at max_concurrent_requests; size
+# the pool to their product so concurrent multi-task requests genuinely overlap
+# their independent compute units (GPU/ANE/CPU) instead of starving each other.
+MAX_TASKS_PER_REQUEST = 3
 _inference_pool = ThreadPoolExecutor(
-    max_workers=settings.max_concurrent_requests, thread_name_prefix="ml-inference"
+    max_workers=settings.max_concurrent_requests * MAX_TASKS_PER_REQUEST,
+    thread_name_prefix="ml-inference",
 )
 
 
