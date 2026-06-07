@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """CLIP embedding-parity harness: the production mlx_clip path vs the Immich server.
 
-Gate for ml-7j8.14. The OpenAI/LAION CLIP models (e.g. ``ViT-B-32__openai``) run
+Parity gate. The OpenAI/LAION CLIP models (e.g. ``ViT-B-32__openai``) run
 through mlx_clip's *own* image processor and BPE tokenizer — NOT the
 Immich-faithful ``immich_preprocess`` path that SigLIP2 uses (which
 ``embedding_parity.py`` covers). So whether their embeddings are interchangeable
@@ -16,7 +16,7 @@ per-item cosine similarity:
                  THE CANDIDATE. Images: mlx_clip ``CLIPImageProcessor``
                  (resize-shortest-224 + center-crop + CLIP-normalize). Text:
                  ``clean_text(canonicalize=False)`` then mlx_clip's CLIP BPE
-                 tokenizer (ml-7j8.14).
+                 tokenizer.
 * ``immich``   — THE GATE: the SAME model's open_clip checkpoint run through
                  Immich's EXACT transform — ``siglip_image_pixels`` with CLIP
                  constants (resize-shortest-224 + center-crop + CLIP-normalize)
@@ -30,17 +30,17 @@ per-item cosine similarity:
                  tokenizer. Isolates any gap that is purely preprocessing rather
                  than weights/activation.
 
-Caveat for non-default models (ml-7j8.14): only ``ViT-B-32__openai`` is verified.
+Caveat for non-default models: only ``ViT-B-32__openai`` is verified.
 ``MLXClip._load_model`` calls ``mlx_clip(repo_id)`` WITHOUT ``hf_repo``, so a
 model whose local dir is absent converts the DEFAULT
 ``openai/clip-vit-base-patch32`` — i.e. ``ViT-B-16__openai`` / ``ViT-L-14__openai``
 / the LAION mappings all silently load OpenAI B-32 weights (empirically ~0 cosine
 vs the right reference). mlx_clip also hardcodes ``quick_gelu`` (``model.py``),
 which is wrong for LAION's standard-GELU ViT-B-32. So those models FAIL this gate;
-run them with ``--model`` to see it. The fix (ml-7j8.17): pass the correct
+run them with ``--model`` to see it. The fix: pass the correct
 ``hf_repo`` so mlx_clip loads the intended OpenAI B-16/L-14 weights, and mark
 LAION unsupported (``MODEL_MAP -> None``, which raises) — mlx_clip can't reproduce
-its standard-GELU activation and the open_clip fallback was removed (ml-b82).
+its standard-GELU activation and the open_clip fallback was removed.
 
 Backends are loaded and freed sequentially to bound peak memory, so this runs on
 a single Apple-Silicon Mac.
@@ -97,14 +97,14 @@ DEFAULT_MODEL = "ViT-B-32__openai"
 
 # open_clip (arch, pretrained) reference for each Immich CLIP name — the
 # checkpoint the standard Immich server exports to ONNX. Mirrors the production
-# resolve_fallback_arch that ml-b82 removed, so the gate keeps a self-contained
+# resolve_fallback_arch that was removed, so the gate keeps a self-contained
 # reference (its open_clip use is dev-only, not a production dependency).
 _OPENCLIP_REF = {
     # OpenAI checkpoints REQUIRE the quickgelu variant — OpenAI CLIP trained with
     # quick_gelu, and mlx_clip hardcodes it too. Loading the plain (standard-gelu)
     # arch builds a wrong-activation reference: open_clip even warns "QuickGELU
     # mismatch", and the gate then false-FAILs a correct mlx_clip at ~0.985 (the
-    # quickgelu-vs-gelu gap) instead of ~1.0 (ml-7j8.17). All three OpenAI ports
+    # quickgelu-vs-gelu gap) instead of ~1.0. All three OpenAI ports
     # must carry -quickgelu, not just B-32.
     "ViT-B-32__openai": ("ViT-B-32-quickgelu", "openai"),
     "ViT-B-16__openai": ("ViT-B-16-quickgelu", "openai"),
@@ -318,7 +318,7 @@ def main() -> int:
         emit("     WEIGHTS, not just preprocessing: MLXClip._load_model calls mlx_clip()")
         emit("     without hf_repo, so non-default models convert the default")
         emit("     openai/clip-vit-base-patch32 (and mlx_clip hardcodes quick_gelu, wrong")
-        emit("     for LAION). Fix (ml-7j8.17): pass the correct hf_repo so mlx_clip loads")
+        emit("     for LAION). Fix: pass the correct hf_repo so mlx_clip loads")
         emit("     the intended weights (OpenAI B-16/L-14), or mark LAION unsupported")
         emit("     (MODEL_MAP -> None; raises). See the README CLIP mapping notes.")
         verdict_rc = 1

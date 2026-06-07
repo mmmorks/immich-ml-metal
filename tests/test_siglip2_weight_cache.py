@@ -1,11 +1,11 @@
-"""Local-cache resolution for converted SigLIP2 MLX weights — ml-ycd.7.
+"""Local-cache resolution for converted SigLIP2 MLX weights.
 
 The accelerator should prefer locally-converted fp16 weights over downloading +
 loading the HF bf16 safetensors on every install. These tests pin the pure
 resolution logic (no weights, no network):
 
   * siglip2_cache_dir derives a dir name that still carries the 'patchNN-NNN'
-    token the mlx-embeddings loader regex requires (ml-ycd.1), and honors the
+    token the mlx-embeddings loader regex requires, and honors the
     ML_MODEL_CACHE_DIR override.
   * siglip2_dir_is_complete only accepts a dir holding config + tokenizer +
     safetensors, so a half-written/aborted convert is ignored.
@@ -144,7 +144,7 @@ def test_resolve_ignores_incomplete_cache(monkeypatch, tmp_path):
     assert path == REPO
 
 
-# --- ensure_siglip2_source (on-demand convert, ml-u2d) -----------------------
+# --- ensure_siglip2_source (on-demand convert) -------------------------------
 
 
 def _patch_convert(monkeypatch, conv):
@@ -251,7 +251,7 @@ def test_ensure_falls_back_to_hf_on_incomplete_convert(hf_miss, monkeypatch):
     assert (source, path) == ("hf", REPO)
 
 
-# --- ensure_siglip2_source: pre-converted HF-repo download (ml-ivw) ----------
+# --- ensure_siglip2_source: pre-converted HF-repo download -------------------
 
 
 def _fake_snapshot(*, boom=False, complete=True):

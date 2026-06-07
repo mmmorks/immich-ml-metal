@@ -44,7 +44,7 @@ def _l2_normalize(embedding: np.ndarray) -> np.ndarray:
 # ``hf_repo`` (default openai/clip-vit-base-patch32) into it. The prior code
 # passed the value POSITIONALLY as model_dir with no hf_repo, so every model
 # whose local dir didn't exist silently converted the DEFAULT OpenAI B-32
-# weights regardless of the requested name (ml-7j8.17) — ViT-B-32__openai was
+# weights regardless of the requested name — ViT-B-32__openai was
 # correct only by coincidence (its target == the default). We now pass the
 # correct hf_repo so the RIGHT checkpoint is converted (see _load_model).
 MODEL_MAP = {
@@ -59,8 +59,8 @@ MODEL_MAP = {
     # LAION CLIP models -> None (no parity-faithful backend). mlx_clip hardcodes
     # quick_gelu, but LAION trained with STANDARD gelu, so mlx_clip cannot
     # reproduce LAION embeddings even from the correct checkpoint; open_clip (the
-    # only faithful backend) was removed (ml-b82). A request raises in
-    # _load_model rather than silently serving non-parity vectors (ml-7j8.17).
+    # only faithful backend) was removed. A request raises in
+    # _load_model rather than silently serving non-parity vectors.
     "ViT-B-32__laion2b-s34b-b79k": None,
     "ViT-B-32__laion2b_s34b_b79k": None,
     # SigLIP / SigLIP2 models. The SO400M SigLIP2 default is handled natively via
@@ -79,18 +79,17 @@ MODEL_MAP = {
 # understands. The repo/dir name MUST contain a 'patchNN-NNN' token or the
 # loader's regex (which is the only patch_size source — config.json omits it)
 # crashes. mlx-embeddings loads the HF bf16 safetensors directly, so no
-# separate conversion step is required (ml-ycd.7 productionizes caching).
-# See the ml-ycd.1 spike writeup for the full rationale.
+# separate conversion step is required.
 #
 # This stays the *original bf16* repo on purpose: it is the on-demand convert
 # source and the last-resort direct-load fallback. The pre-converted *fp16*
-# download home is separate — `_siglip2_hf_repo()`, now mlx-community (ml-5t0).
+# download home is separate — `_siglip2_hf_repo()`, now mlx-community.
 MLX_EMBEDDINGS_MAP = {
     "ViT-SO400M-16-SigLIP2-384__webli": "google/siglip2-so400m-patch16-384",
 }
 
 
-# --- Local converted-weight cache (ml-ycd.7) ---------------------------------
+# --- Local converted-weight cache -------------------------------------------
 #
 # The native SigLIP2 backend can load the HF bf16 safetensors directly, but a
 # one-time fp16 convert (scripts/convert_siglip2_mlx.py) is ~2.2 GB and avoids
@@ -123,7 +122,7 @@ def mlx_clip_cache_dir(hf_repo: str) -> Path:
     the Immich model name) lets every name resolving to the same checkpoint share
     one convert, and keeps the converted weights inside our managed cache root
     instead of a stray dir named after the repo id in the process CWD (the prior
-    behaviour when the repo id was passed as model_dir — ml-7j8.17).
+    behaviour when the repo id was passed as model_dir).
     """
     return _ml_model_cache_root() / f"mlx_clip-{hf_repo.replace('/', '__')}"
 
@@ -132,7 +131,7 @@ def _expected_vision_arch(hf_repo: str) -> dict:
     """Discriminating vision-tower params an OpenAI CLIP repo id encodes.
 
     Used by the _load_model load-time guard to check the checkpoint mlx_clip
-    ACTUALLY loaded against the one we requested (ml-nqd). The repo name carries
+    ACTUALLY loaded against the one we requested. The repo name carries
     both discriminators between the supported ports — patch size ('patchNN') and
     base/large width (768/1024) — so they can be compared to the loaded model's
     config without a separate manifest. Returns {} when the id encodes neither
@@ -153,7 +152,7 @@ def siglip2_cache_dir(repo_id: str) -> Path:
     """Default local cache dir for a converted SigLIP2 repo.
 
     The dir name is the repo basename, which for the supported model keeps the
-    'patchNN-NNN' token the mlx-embeddings loader regex requires (ml-ycd.1) —
+    'patchNN-NNN' token the mlx-embeddings loader regex requires —
     config.json omits patch_size, so the path string is the only source.
     """
     return _ml_model_cache_root() / repo_id.split("/")[-1]
@@ -206,7 +205,7 @@ def _siglip2_auto_convert_enabled() -> bool:
 def _siglip2_hf_repo() -> str:
     """Pre-converted fp16 SigLIP2 repo to snapshot before converting locally.
 
-    Defaults to the canonical ``mlx-community`` convert (ml-yo9) — the same fp16
+    Defaults to the canonical ``mlx-community`` convert — the same fp16
     bytes as the original ``mmmorks/...`` publish, but in the community org so
     installs pull from an upstream home. NOTE this is the fp16 *download* source,
     NOT ``MLX_EMBEDDINGS_MAP`` (which stays ``google/...``: it is the bf16
@@ -242,7 +241,7 @@ def _convert_siglip2(repo_id: str, out: Path) -> bool:
 def ensure_siglip2_source(repo_id: str) -> tuple[str, str]:
     """Resolve the SigLIP2 weights source, materializing a local fp16 cache if needed.
 
-    Resolution order (ml-u2d / ml-ivw):
+    Resolution order:
 
     1. ``ML_SIGLIP2_MLX_PATH`` override, or a complete local cache
        (:func:`resolve_siglip2_source`).
@@ -302,7 +301,7 @@ def _resolve_siglip2_tokenizer_json(path_or_repo: str) -> str:
     """Path to the tokenizer.json that matches the SigLIP2 weights at ``path_or_repo``.
 
     The tokenizer MUST come from the SAME source as the weights, or query
-    embeddings silently diverge from the index (ml-qax). ``path_or_repo`` is
+    embeddings silently diverge from the index. ``path_or_repo`` is
     whatever ``ensure_siglip2_source`` resolved — a local dir (cache or local
     override) or an HF repo id (a non-dir override, or the default bf16 repo).
 
@@ -369,11 +368,11 @@ class MLXClip:
                 # preprocessing diverged from the index) and the LAION ports
                 # (mlx_clip's hardcoded quick_gelu can't reproduce LAION's
                 # standard gelu). open_clip — their only faithful backend — was
-                # removed (ml-b82), so fail clearly rather than silently
-                # substituting the wrong (default) model (ml-7j8.17).
+                # removed, so fail clearly rather than silently
+                # substituting the wrong (default) model.
                 raise RuntimeError(
                     f"CLIP model '{self.model_name}' has no parity-faithful MLX backend. The "
-                    f"open_clip fallback was removed (ml-b82) because its SigLIP preprocessing "
+                    f"open_clip fallback was removed because its SigLIP preprocessing "
                     f"diverges from the Immich index, and mlx_clip's hardcoded quick_gelu cannot "
                     f"reproduce LAION weights; only models with a native MLX or mlx_clip port are "
                     f"served. Supported: {_supported_model_names()}."
@@ -381,7 +380,7 @@ class MLXClip:
         else:
             # An unmapped model name. This used to silently load MODEL_MAP['default']
             # (ViT-B-32) — a wrong, index-incompatible vector signalled only by a log
-            # line (ml-bu1 / ml-95y finding c1: degrade-to-wrong, invisible until search
+            # line (degrade-to-wrong, invisible until search
             # quality drops). Fail loudly with the same clear error as the None-backend
             # branch instead. MODEL_MAP['default'] stays reachable only via an explicit
             # 'default' request (internal/test use), never from an unmapped Immich request.
@@ -396,7 +395,7 @@ class MLXClip:
         # mlx_clip converts hf_repo into it; afterwards it loads the converted
         # weights. Passing self._repo_id positionally (the prior bug) made it the
         # model_dir, so an absent dir silently converted the DEFAULT OpenAI B-32
-        # for every model (ml-7j8.17).
+        # for every model.
         cache_dir = mlx_clip_cache_dir(self._repo_id)
         logger.info(f"Loading MLX CLIP model: {self.model_name} -> hf_repo={self._repo_id}, cache={cache_dir}")
         self._model = mlx_clip(str(cache_dir), hf_repo=self._repo_id)
@@ -407,7 +406,7 @@ class MLXClip:
     def _assert_mlx_clip_checkpoint(self, cache_dir: Path):
         """Fail loud if mlx_clip loaded a checkpoint other than the one requested.
 
-        Defends against the ml-7j8.17 footgun resurfacing. mlx_clip is a small
+        Defends against the silent-wrong-weights footgun resurfacing. mlx_clip is a small
         third-party port (harperreed) whose ctor converts its DEFAULT checkpoint
         (openai/clip-vit-base-patch32) when the cache dir is absent — regardless
         of hf_repo. We pass hf_repo correctly today, but a version bump (or a
@@ -441,7 +440,7 @@ class MLXClip:
                 raise RuntimeError(
                     f"mlx_clip loaded the WRONG checkpoint for '{self.model_name}': requested "
                     f"{self._repo_id} (vision {attr}={want}) but the loaded model reports "
-                    f"{attr}={got}. This is the ml-7j8.17 silent-wrong-weights footgun — an absent "
+                    f"{attr}={got}. This is the silent-wrong-weights footgun — an absent "
                     f"or stale cache dir makes mlx_clip serve its DEFAULT openai/clip-vit-base-patch32. "
                     f"Refusing to serve index-incompatible embeddings; delete the cache dir "
                     f"({cache_dir}) and verify the mlx_clip version."
@@ -453,12 +452,12 @@ class MLXClip:
         Returns (model, SiglipProcessor); the processor exposes both an
         image_processor and a tokenizer. Inference uses
         get_image_features / get_text_features (single-modality, un-normalized)
-        — NOT Model.__call__, which requires both modalities (see ml-ycd.1).
+        — NOT Model.__call__, which requires both modalities.
         """
         from mlx_embeddings.utils import load
 
         repo = MLX_EMBEDDINGS_MAP[self.model_name]
-        # ml-ycd.7 / ml-u2d: prefer a local fp16 convert over the HF bf16 download,
+        # prefer a local fp16 convert over the HF bf16 download,
         # converting on demand the first time none exists. ensure_siglip2_source
         # picks (in order) the ML_SIGLIP2_MLX_PATH override, a complete cache dir,
         # else converts into the cache dir once (unless ML_SIGLIP2_AUTO_CONVERT=0),
@@ -469,12 +468,12 @@ class MLXClip:
         logger.info(f"Loading SigLIP2 via mlx-embeddings: {self.model_name} -> {path_or_repo} (source={source})")
         # load() returns (model, SiglipProcessor), but the SigLIP2 paths
         # preprocess via src.models.immich_preprocess (siglip_image_pixels +
-        # SiglipTextTokenizer, see ml-ycd.4), so the processor is unused here —
+        # SiglipTextTokenizer), so the processor is unused here —
         # discard it rather than storing a dead reference.
         self._model, _ = load(path_or_repo)
         self._repo_id = path_or_repo
 
-        # Immich-faithful text tokenizer (ml-ycd.4): the standard Immich server
+        # Immich-faithful text tokenizer: the standard Immich server
         # applies clean_text (canonicalize) then a raw tokenizer.json. HF
         # SiglipProcessor skips canonicalization and diverges on caps/punctuation,
         # so we tokenize exactly like the server to keep query embeddings aligned
@@ -605,7 +604,7 @@ class MLXClip:
         # the standard Immich server's. canonicalize=False (collapse whitespace
         # only — no lowercase/punctuation strip): unlike SigLIP, the OpenAI/LAION
         # BPE tokenizer is case- and punctuation-bearing, so only whitespace is
-        # canonicalized (ml-7j8.14). Use the low-level model(input_ids=...) and
+        # canonicalized. Use the low-level model(input_ids=...) and
         # take text_embeds[0]; mlx_clip's high-level text_encoder() returns a
         # Python list, which breaks _l2_normalize/.flatten(). This mirrors the
         # image path: tokenization is CPU-only and runs outside the lock, with

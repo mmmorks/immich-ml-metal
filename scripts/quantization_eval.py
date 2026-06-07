@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Quantization evaluation for the native MLX SigLIP2 backend (ml-ycd.6).
+"""Quantization evaluation for the native MLX SigLIP2 backend.
 
 Measures **latency, memory and embedding accuracy** across weight precisions and
-picks a default. The baseline is the production fp16 convert (ml-ycd.7); every
+picks a default. The baseline is the production fp16 convert; every
 other precision is compared against it because fp16 is what the existing 4716-row
 smart-search index was (or will be) built with — so "accuracy" here means *cosine
 agreement with fp16*, the drift a user's search results would actually see.
@@ -12,7 +12,7 @@ What it does, per precision config:
   1. Build the converted dir if missing (``mlx_embeddings.convert``, quantize=...),
      named with the loader's required ``patchNN-NNN`` token + a precision suffix
      (e.g. ``siglip2-so400m-patch16-384-4bit``). The loader regex
-     ``patch\\d+-(\\d+)(?:-|$)`` tolerates the suffix (verified in ml-yo9 notes).
+     ``patch\\d+-(\\d+)(?:-|$)`` tolerates the suffix (verified during conversion testing).
   2. Load it through the **production path** (``src.models.clip.MLXClip`` with the
      ``ML_SIGLIP2_MLX_PATH`` override) — so we measure exactly what Immich runs,
      not a bespoke loader.

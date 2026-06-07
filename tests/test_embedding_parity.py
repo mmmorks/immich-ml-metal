@@ -1,4 +1,4 @@
-"""Tests for scripts/embedding_parity.py — ml-7fa.
+"""Tests for scripts/embedding_parity.py.
 
 A single failed sample-image download used to silently switch the WHOLE run to
 synthetic images (discarding already-fetched reals) with a zero exit, so the

@@ -1,4 +1,4 @@
-"""Tests for scripts/face_embedding_parity.py — ml-7j8.13.
+"""Tests for scripts/face_embedding_parity.py.
 
 Cover the pure, model-free pieces of the face-parity harness: IoU box overlap,
 the greedy cross-detector matcher (the bit that stops index-0-vs-index-0

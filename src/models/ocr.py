@@ -89,7 +89,7 @@ def recognize_text(image_bytes: bytes, min_confidence: float = 0.0, use_language
     except Exception as e:
         # Hard decode failure — raise so the request fails (non-2xx) and Immich
         # retries, instead of silently returning an empty result that marks the
-        # asset permanently processed and hides the failure (ml-1s2). This is a
+        # asset permanently processed and hides the failure. This is a
         # hard error, distinct from a genuinely text-free image (empty success).
         logger.error(f"Failed to load image for OCR: {e}")
         raise
@@ -118,7 +118,7 @@ def _recognize_text_impl(image_bytes: bytes, img_width: int, img_height: int, mi
 
         if not success or error:
             # Hard Vision-framework failure — raise so Immich retries rather
-            # than recording a false "no text" result (ml-1s2). A successful
+            # than recording a false "no text" result. A successful
             # request with zero observations falls through to an empty result.
             raise RuntimeError(f"Vision OCR request failed: {error}")
 
@@ -174,7 +174,7 @@ def _recognize_text_impl(image_bytes: bytes, img_width: int, img_height: int, mi
     except Exception as e:
         # Unexpected hard failure during recognition — log with traceback, then
         # re-raise so the request fails and Immich retries rather than storing a
-        # false empty result (ml-1s2).
+        # false empty result.
         logger.error(f"OCR failed: {e}", exc_info=True)
         raise
 

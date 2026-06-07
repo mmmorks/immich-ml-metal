@@ -1,6 +1,6 @@
 """Concurrency tests for MLXClip — a model switch must not crash in-flight requests.
 
-Regression coverage for ml-7j8.1: get_clip_model() unloads the shared
+Regression coverage: get_clip_model() unloads the shared
 _current_model instance when a different model is requested, setting
 self._model=None on the instance an in-flight encode_*() call still holds.
 The retry loops must notice the swap-to-None and raise a clean RuntimeError
@@ -111,7 +111,7 @@ def test_encode_text_unloaded_midflight_no_attributeerror():
         clip.encode_text("a photo of a cat")
 
 
-# --- Native SigLIP2 backend (mlx-embeddings) — ml-ycd.5 -----------------------
+# --- Native SigLIP2 backend (mlx-embeddings) ---------------------------------
 #
 # These guard the metal_lock contract for the new backend: MLX work is lazy, so
 # get_*_features() output MUST be materialized (np.array) *inside* the inference
@@ -182,7 +182,7 @@ class _FakeSiglip2Model:
 def _bare_siglip2(model, processor):
     """Build a SigLIP2-backed MLXClip without loading real weights.
 
-    Post-ml-ycd.4 the SigLIP2 encode paths preprocess via
+    The SigLIP2 encode paths preprocess via
     src.models.immich_preprocess (siglip_image_pixels + a SiglipTextTokenizer),
     NOT the SiglipProcessor — so the image path needs no processor and the text
     path uses a callable tokenizer returning (1, ctx) int32 ids.

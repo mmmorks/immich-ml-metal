@@ -1,11 +1,11 @@
-"""Parity guard for the face-alignment migration (ml-9js).
+"""Parity guard for the face-alignment migration.
 
 ``face_embed._norm_crop`` replaces ``insightface.utils.face_align.norm_crop``,
 which internally calls skimage's deprecated ``SimilarityTransform.estimate``
 (removed in scikit-image 2.2). The replacement uses the current
 ``SimilarityTransform.from_estimate`` constructor. These tests assert the
 replacement is *bit-for-bit identical* to insightface on valid landmarks, so the
-migration did not move the production face index (ml-7j8.13 decided PRESERVE).
+migration did not move the production face index (the parity gate decided PRESERVE).
 """
 
 import warnings
@@ -21,7 +21,7 @@ def _insightface_norm_crop(img, kps, image_size):
 
     insightface calls skimage's deprecated estimate(); suppress that FutureWarning
     locally so it never reaches the global pytest warnings summary (the whole point
-    of ml-9js is that our runtime no longer triggers it)."""
+    of the migration is that our runtime no longer triggers it)."""
     from insightface.utils import face_align
 
     with warnings.catch_warnings():
@@ -52,7 +52,7 @@ def test_norm_crop_rejects_wrong_shape():
 
 def test_norm_crop_raises_on_degenerate_landmarks():
     """All-identical points are too degenerate to estimate -> ValueError, so the
-    caller skips the face (ml-6o9) instead of insightface's silent NaN-matrix crop."""
+    caller skips the face instead of insightface's silent NaN-matrix crop."""
     img = np.zeros((100, 100, 3), dtype=np.uint8)
     kps = np.zeros((5, 2), dtype=np.float32)
     with pytest.raises(ValueError):

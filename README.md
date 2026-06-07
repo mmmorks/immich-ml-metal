@@ -150,8 +150,8 @@ Configure via environment variables or edit `src/config.py`:
 
 The LAION and ViT-B-16 SigLIP variants have no parity-faithful MLX backend, so
 requesting one raises a clear error rather than silently serving non-parity
-embeddings (see [Parity-or-fail](#parity-or-fail)). **Before this was fixed
-(ml-7j8.17), every mlx_clip model except `ViT-B-32__openai` silently loaded OpenAI
+embeddings (see [Parity-or-fail](#parity-or-fail)). **Before this was fixed,
+every mlx_clip model except `ViT-B-32__openai` silently loaded OpenAI
 B-32 weights**: the repo id was passed as `mlx_clip`'s local `model_dir` instead of
 its `hf_repo`, so an absent dir fell back to `mlx_clip`'s default (OpenAI B-32)
 checkpoint regardless of the requested name.
@@ -169,8 +169,8 @@ cosine `1.0000` (12 photos × 12 queries), top-1 retrieval agreement `1.000`, vs
 Immich-transform reference (and, for B-32, open_clip's own transform too):
 
 - **`ViT-B-32__openai`** — `1.0000` / `1.0000`.
-- **`ViT-B-16__openai`** — `1.0000` / `1.0000` (after ml-7j8.17).
-- **`ViT-L-14__openai`** — `1.0000` / `1.0000` (after ml-7j8.17).
+- **`ViT-B-16__openai`** — `1.0000` / `1.0000` (after the wrong-weights fix).
+- **`ViT-L-14__openai`** — `1.0000` / `1.0000` (after the wrong-weights fix).
 
 The mlx_clip path applies `clean_text(canonicalize=False)` then mlx_clip's CLIP BPE
 tokenizer (whitespace-only canonicalization — OpenAI BPE is case/punctuation-bearing,
@@ -179,12 +179,12 @@ reproducing the standard Immich server. mlx_clip's hardcoded `quick_gelu` is the
 correct OpenAI activation, so its embeddings are bit-faithful to the upstream
 quickgelu checkpoint.
 
-Until ml-7j8.17, B-16/L-14 silently served the **default** `openai/clip-vit-base-patch32`
+Until that fix, B-16/L-14 silently served the **default** `openai/clip-vit-base-patch32`
 weights (`MLXClip._load_model` passed the repo id as mlx_clip's `model_dir`, not its
 `hf_repo`), measuring ~0 cosine; passing the correct `hf_repo` fixed it. **LAION is
 unsupported** — it needs standard GELU but mlx_clip hardcodes `quick_gelu`, so it
 cannot be reproduced and `_load_model` raises (the open_clip fallback that once
-served it was removed, ml-b82). The gate's open_clip reference uses the `-quickgelu`
+served it was removed). The gate's open_clip reference uses the `-quickgelu`
 arch for every OpenAI port; a plain (standard-gelu) reference false-FAILs a correct
 mlx_clip at ~0.985 (the quickgelu-vs-gelu gap). Re-check any model with
 `.venv/bin/python scripts/clip_parity.py --model <name>`.

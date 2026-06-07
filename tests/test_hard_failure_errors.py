@@ -1,4 +1,4 @@
-"""ml-1s2: hard decode/Vision/inference failures must surface as errors.
+"""Hard decode/Vision/inference failures must surface as errors.
 
 A hard failure (image decode error, Vision-framework error, unexpected
 inference exception) must raise so the /predict request fails and Immich

@@ -1,14 +1,14 @@
-# Embedding-parity harness — MLX SigLIP2 vs the Immich server (ml-ycd.2)
+# Embedding-parity harness — MLX SigLIP2 vs the Immich server
 
 **Date:** 2026-06-06
 **Harness:** `ml/scripts/embedding_parity.py`
 **Raw run output:** `ml/docs/plans/2026-06-06-embedding-parity-raw.txt`
 **Gates:** the preserve-vs-reindex decision for Immich's existing smart-search
-index (4716 rows, model `ViT-SO400M-16-SigLIP2-384__webli`) — blocks ml-ycd.9
-(execute index strategy) and ml-ycd.6 (quantization eval). Hard input to ml-ycd.4
-(preprocessing parity).
+index (4716 rows, model `ViT-SO400M-16-SigLIP2-384__webli`) — blocks the index
+strategy (execute index strategy) and the quantization eval. Hard input to the
+preprocessing-parity fix.
 
-## UPDATE 2026-06-06 — RESOLVED by ml-ycd.4
+## UPDATE 2026-06-06 — RESOLVED by the preprocessing-parity fix
 
 The preprocessing fix is implemented. `clip.py` now preprocesses SigLIP2 images
 and text exactly like the Immich server via the shared `src/models/immich_preprocess.py`
@@ -22,16 +22,16 @@ Re-running the harness (`--ref immich`, the production preprocessing on both sid
 Verdict flips to **PASS / PRESERVE** — the MLX backend now produces embeddings
 interchangeable with the standard Immich server. The `transformers` (HF squash)
 reference now reads ~0.83, which is just the *regression witness* showing the size
-of the bug that was fixed. Remaining: ml-410 confirms against real stored vectors.
+of the bug that was fixed. Remaining: confirm against real stored vectors.
 The analysis below documents the original finding that drove the fix.
 
 ---
 
-## TL;DR — verdict (original ml-ycd.2 finding): **FIX-PREPROCESSING (then PRESERVE)**
+## TL;DR — verdict (original finding): **FIX-PREPROCESSING (then PRESERVE)**
 
 The MLX SigLIP2 **model is bit-for-bit faithful** to the reference (MLX vs HF
-`transformers` = **1.0000** on every item). But the MLX backend as merged in
-ml-ycd.3 does **not** reproduce the embeddings already in the index, because it
+`transformers` = **1.0000** on every item). But the MLX backend as originally
+merged does **not** reproduce the embeddings already in the index, because it
 preprocesses images differently from the standard Immich ML server:
 
 | Comparison (12 photos × 12 queries, 640×480) | IMAGE cosine (min / mean / median) | TEXT cosine (median) |
@@ -85,7 +85,7 @@ the MLX model therefore reproduces the Immich-server embedding to ~1.0 (same
 weights, same pixels). So:
 
 * **Do NOT re-index.** The 4716 stored vectors stay valid.
-* **ml-ycd.4:** replace the `SiglipProcessor` image path in
+* **The preprocessing-parity fix:** replace the `SiglipProcessor` image path in
   `_encode_image_siglip2` with Immich's exact transform — PIL bicubic
   resize-shortest-side-to-384, center-crop 384, `/255`, normalize 0.5 — then feed
   the resulting `pixel_values` to `get_image_features`. Text is already at parity

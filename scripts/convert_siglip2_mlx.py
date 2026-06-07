@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert SigLIP2 SO400M weights to MLX fp16 and cache them locally (ml-ycd.7).
+"""Convert SigLIP2 SO400M weights to MLX fp16 and cache them locally.
 
 A deterministic, idempotent wrapper around ``mlx_embeddings``' converter. By
 default it writes to the exact local cache dir the accelerator auto-loads from
@@ -10,8 +10,7 @@ the HF bf16 safetensors and converting on first use of every install.
 CRITICAL: the output dir name MUST contain a 'patchNN-NNN' token — the
 mlx-embeddings loader regex-parses the patch size from the path and crashes
 otherwise (config.json omits patch_size). The default cache dir keeps the repo
-basename, which satisfies this; a custom --mlx-path is validated up front. See
-the ml-ycd.1 spike for the full rationale.
+basename, which satisfies this; a custom --mlx-path is validated up front.
 
 The converter copies config.json / *.json and saves tokenizer.json into the
 output dir, so the result is self-contained (weights + config + tokenizer) and
@@ -23,7 +22,7 @@ Usage (from ml/, venv active):
     .venv/bin/python scripts/convert_siglip2_mlx.py --force         # re-convert
     .venv/bin/python scripts/convert_siglip2_mlx.py --verify        # load + encode check
     .venv/bin/python scripts/convert_siglip2_mlx.py \
-        --upload-repo mlx-community/siglip2-so400m-patch16-384       # publish (ml-yo9)
+        --upload-repo mlx-community/siglip2-so400m-patch16-384       # publish
 """
 
 from __future__ import annotations
@@ -49,7 +48,7 @@ _PATCH_TOKEN = re.compile(r"patch\d+-\d+(?:-|$)")
 
 
 def _require_patch_token(value: str, flag: str) -> None:
-    """Raise ValueError if ``value`` lacks a 'patchNN-NNN' token (ml-ycd.1).
+    """Raise ValueError if ``value`` lacks a 'patchNN-NNN' token.
 
     The mlx-embeddings loader regex-parses the patch/image size from the path or
     repo-id string (config.json omits patch_size), so both the local --mlx-path
@@ -72,7 +71,7 @@ def _upload_existing(path: Path, upload_repo: str, hf_path: str) -> None:
     so replicate just the upload step here — the dir is self-contained (weights +
     config + tokenizer), so the only extra input upload_to_hub needs is the
     config dict, which we read back from config.json. Without this, --upload-repo
-    on a complete cache silently no-ops and still exits 0 (ml-5zl).
+    on a complete cache silently no-ops and still exits 0.
     """
     import json
 
@@ -142,7 +141,7 @@ def main() -> int:
     ap.add_argument(
         "--upload-repo",
         default=None,
-        help="Optional HF repo to publish the converted dir to (ml-yo9).",
+        help="Optional HF repo to publish the converted dir to.",
     )
     ap.add_argument(
         "--force",
@@ -158,7 +157,7 @@ def main() -> int:
 
     out = Path(args.mlx_path) if args.mlx_path else siglip2_cache_dir(DEFAULT_HF_REPO)
 
-    # Fail fast on the one mistake that crashes the loader later (ml-ycd.1) — for
+    # Fail fast on the one mistake that crashes the loader later — for
     # the local dir AND, if publishing, the upload repo (which would crash every
     # consumer that pulls it).
     try:

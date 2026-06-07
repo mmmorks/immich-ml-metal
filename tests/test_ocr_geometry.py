@@ -4,7 +4,7 @@ Pure-logic coverage for the Vision (bottom-left-origin, normalized) to Immich
 (top-left-origin, 8-coord clockwise quad) conversion. Covers the Y-flip and
 corner ordering.
 
-ml-7j8.12: output must be floats normalized to [0, 1] (pixel coord / image
+output must be floats normalized to [0, 1] (pixel coord / image
 dimension), matching upstream immich_ml's OCR contract — NOT absolute pixel
 ints, which downstream overlay consumers would mis-place.
 """

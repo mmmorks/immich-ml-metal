@@ -13,13 +13,13 @@ from PIL import Image
 
 logger = logging.getLogger(__name__)
 
-# Nose-anchor reconstruction strategy for the ArcFace 5-point landmarks (ml-eo4).
+# Nose-anchor reconstruction strategy for the ArcFace 5-point landmarks.
 # Apple Vision gives a nose *contour*, not a single tip, so we pick one anchor:
 #   "tip"    — the last contour point. Production default; matches the index the
-#              library was built with (ml-7j8.13 verified PRESERVE on frontal LFW).
+#              library was built with (parity-verified PRESERVE on frontal LFW).
 #   "center" — the contour centroid (mean). More robust where the last contour
 #              point swings off the tip on non-frontal/occluded poses; the
-#              candidate ml-eo4 evaluates for drift before any adoption.
+#              candidate evaluated for drift before any adoption.
 NOSE_STRATEGIES = ("tip", "center")
 DEFAULT_NOSE_STRATEGY = "tip"
 
@@ -85,7 +85,7 @@ def detect_faces(image_bytes: bytes, nose_strategy: str = DEFAULT_NOSE_STRATEGY)
         image_bytes: Raw image data (JPEG, PNG, etc.)
         nose_strategy: Nose-anchor reconstruction for the 5-point landmarks
             ("tip" = last nose-contour point, the production default; "center" =
-            nose-contour centroid — the ml-eo4 drift-evaluation variant).
+            nose-contour centroid — the drift-evaluation variant).
 
     Returns:
         Tuple of (faces, image_width, image_height)

@@ -54,7 +54,7 @@ def _norm_crop(img: np.ndarray, landmarks: np.ndarray, image_size: int = ARCFACE
 
     Raises ``ValueError`` if the landmarks are not 5x2 or the geometry is too
     degenerate to estimate (``from_estimate`` returns a falsy ``FailedEstimation``).
-    Callers already treat an alignment exception as "skip this face" (ml-6o9), so a
+    Callers already treat an alignment exception as "skip this face", so a
     face we can't pose-normalize is left un-embedded rather than warped through a
     NaN matrix into a garbage crop — the one intended deviation from insightface,
     which silently does the latter.
@@ -341,7 +341,7 @@ def get_face_embeddings_batch(img_bgr: np.ndarray, faces: list[dict], model_name
     what makes an ArcFace embedding comparable to the rest of the index. A face
     without landmarks is skipped (None) and warned about rather than bbox-cropped,
     because a non-pose-normalized crop yields a drifted vector that would silently
-    degrade the shared index (ml-6o9).
+    degrade the shared index.
 
     Args:
         img_bgr: Pre-decoded BGR image (np.ndarray from cv2.imdecode).
@@ -359,8 +359,8 @@ def get_face_embeddings_batch(img_bgr: np.ndarray, faces: list[dict], model_name
     # A face WITHOUT 5-point landmarks is skipped, not bbox-cropped: a plain
     # bbox crop has no pose normalization, so its ArcFace embedding lives in a
     # different geometry than the landmark-aligned crops this index is built
-    # from. Mixing such a vector into the shared index is silent degrade-to-wrong
-    # (ml-6o9 / ml-95y c2). Better to leave the face un-embedded (visible, the
+    # from. Mixing such a vector into the shared index is silent degrade-to-wrong.
+    # Better to leave the face un-embedded (visible, the
     # caller drops it) than to poison the index. The WARNING surfaces the
     # landmark miss that face_detect only logs at DEBUG.
     aligned: list[np.ndarray | None] = []

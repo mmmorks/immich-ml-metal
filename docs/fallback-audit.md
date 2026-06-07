@@ -1,10 +1,10 @@
-# Fallback silent-harm audit (ml-95y)
+# Fallback silent-harm audit
 
 Audit of every fallback path in `ml/src/` for the hazard class that motivated this
-bead: a "best-effort" fallback that **silently produces WRONG or INCOMPATIBLE output
+audit: a "best-effort" fallback that **silently produces WRONG or INCOMPATIBLE output
 instead of failing loudly** — the way the removed open_clip CLIP fallback served
 squash-preprocessed embeddings (~0.83 cosine vs the index) and poisoned smart search
-with only a log line as signal (ml-7j8.11, ml-b82).
+with only a log line as signal.
 
 Classification:
 
@@ -19,11 +19,11 @@ invisible until later.**
 
 ## (c) Silently harmful — follow-up beads filed
 
-| Site | What it does | Why harmful | Bead |
+| Site | What it does | Why harmful | Failure mode |
 |------|--------------|-------------|------|
-| `clip.py:325-327` `_load_model` else-branch | Unknown (unmapped) CLIP model name → WARNING + serve `ViT-B-32__openai` | Wrong-model, index-incompatible vectors served for any unmapped name. Inconsistent with the already-hardened sibling branches, which **raise** for a None-backend model (`clip.py:317-324`) and for a SigLIP2 load failure. | **ml-bu1** |
-| `face_embed.py:313-331` (with `face_detect.py:226-234`) | Face missing `landmarks` → silent bbox-crop + resize instead of landmark `norm_crop` | bbox crop skips pose normalization → drifted ArcFace embedding mixed into the **same** index that ml-7j8.13 verified parity for *only with* landmark alignment. Landmark-miss is DEBUG-only, fallback itself is silent. | **ml-6o9** |
-| `ocr.py:89-91, 115-117, 168-170`; `main.py:341-343` | Hard failure (decode error, Vision error, inference exception) → return empty result | Does **not** poison with wrong vectors (stores nothing), but Immich can't tell "decode failed" from "no text/faces", marks the asset processed, and never retries → permanent silent false-negative. | **ml-1s2** |
+| `clip.py:325-327` `_load_model` else-branch | Unknown (unmapped) CLIP model name → WARNING + serve `ViT-B-32__openai` | Wrong-model, index-incompatible vectors served for any unmapped name. Inconsistent with the already-hardened sibling branches, which **raise** for a None-backend model (`clip.py:317-324`) and for a SigLIP2 load failure. | **Wrong-model vectors** |
+| `face_embed.py:313-331` (with `face_detect.py:226-234`) | Face missing `landmarks` → silent bbox-crop + resize instead of landmark `norm_crop` | bbox crop skips pose normalization → drifted ArcFace embedding mixed into the **same** index that the face-embedding parity gate verified parity for *only with* landmark alignment. Landmark-miss is DEBUG-only, fallback itself is silent. | **Silent bbox-crop fallback** |
+| `ocr.py:89-91, 115-117, 168-170`; `main.py:341-343` | Hard failure (decode error, Vision error, inference exception) → return empty result | Does **not** poison with wrong vectors (stores nothing), but Immich can't tell "decode failed" from "no text/faces", marks the asset processed, and never retries → permanent silent false-negative. | **Silent empty result** |
 
 ## Explicitly adjudicated as NOT harmful (the two the bead called out + corrections)
 

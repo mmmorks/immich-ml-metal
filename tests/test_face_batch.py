@@ -139,7 +139,7 @@ def test_all_faces_fail():
     assert all(r is None for r in results)
 
 
-# --- Landmark-miss handling (ml-6o9) ---
+# --- Landmark-miss handling ---
 
 
 def test_face_without_landmarks_is_skipped(mock_model, caplog):

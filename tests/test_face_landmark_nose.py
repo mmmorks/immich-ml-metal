@@ -1,9 +1,9 @@
-"""Tests for the Vision nose-landmark strategy (ml-eo4).
+"""Tests for the Vision nose-landmark strategy.
 
 The fork reconstructs ArcFace's 5-point landmarks from Apple Vision face
 *contours*. The nose anchor historically used the *last* point of the nose
 contour (``"tip"``). On non-frontal/occluded poses that last contour point can
-swing off the actual nose tip and drift the alignment, so ml-eo4 adds a
+swing off the actual nose tip and drift the alignment, so the fork adds a
 ``"center"`` variant (the nose-contour centroid) to evaluate against it.
 
 These cover the pure point-selection helper and that the strategy is threaded

@@ -25,7 +25,7 @@ mlx-clip @ git+https://github.com/harperreed/mlx_clip.git@f56e3ecc72c74c68b6b50e
 # Native MLX SigLIP2 backend (Blaizzy/mlx-embeddings). Drives the
 # ViT-SO400M-16-SigLIP2-384__webli smart-search model on-device via MLX.
 # Pinned: the loader's patch-size regex and the get_image_features/
-# get_text_features API are version-specific (see ml-ycd.1 spike).
+# get_text_features API are version-specific.
 # Pulls in mlx-vlm + transformers.
 mlx-embeddings==0.1.0
 

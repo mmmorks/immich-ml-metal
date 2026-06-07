@@ -341,7 +341,7 @@ def _run_face_recognition_sync(image_bytes: bytes, min_score: float, model_name:
         if img_bgr is None:
             # Hard decode failure — raise so the request fails (non-2xx) and
             # Immich retries, rather than returning an empty result that marks
-            # the asset processed and permanently drops its faces (ml-1s2). A
+            # the asset processed and permanently drops its faces. A
             # genuinely face-free image returns [] earlier via scored_faces.
             raise RuntimeError("Failed to decode image for face recognition")
 
@@ -462,8 +462,8 @@ async def predict(
     # to _inference_pool via run_in_executor, which cannot be cancelled: once a
     # thread starts inference it runs to completion. Wrapping the processing in a
     # timeout would just abandon nearly-finished work while the pool thread keeps
-    # running, orphaning a slot and cascading timeouts under sustained overload
-    # (ml-7j8.2). So we time out the acquire, then run to completion uncancelled.
+    # running, orphaning a slot and cascading timeouts under sustained overload.
+    # So we time out the acquire, then run to completion uncancelled.
     semaphore = get_request_semaphore()
     acquired = False
     try:

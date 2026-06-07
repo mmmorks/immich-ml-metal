@@ -1,4 +1,4 @@
-"""Backend tests for MLXClip — ml-ycd.10.
+"""Backend tests for MLXClip.
 
 Covers the contract of the native MLX SigLIP2 backend (mlx-embeddings) and the
 model-name routing/caching in get_clip_model, without loading real weights:
@@ -90,7 +90,7 @@ class _FakeSiglip2Model:
 def _bare_siglip2(model, processor=None):
     """Build a SigLIP2-backed MLXClip without loading real weights.
 
-    Post-ml-ycd.4 the SigLIP2 encode paths preprocess via
+    The SigLIP2 encode paths preprocess via
     src.models.immich_preprocess (siglip_image_pixels + a SiglipTextTokenizer)
     rather than the SiglipProcessor, so inject a callable tokenizer returning
     (1, ctx) int32 ids; the image path needs no processor.
@@ -147,7 +147,7 @@ def test_siglip2_image_and_text_paths_independent():
         assert np.linalg.norm(emb) == pytest.approx(1.0, abs=1e-5)
 
 
-# --- Zero-embedding guard (ml-9g1) -------------------------------------------
+# --- Zero-embedding guard -----------------------------------------------------
 #
 # A genuinely zero pooled output (degenerate input / fp16 underflow) divided by
 # its zero L2 norm yields an all-NaN vector that silently poisons the smart-
@@ -175,7 +175,7 @@ def test_siglip2_text_zero_embedding_does_not_nan():
     assert np.all(emb == 0.0), "a zero raw output should stay zero, not become NaN"
 
 
-# --- mlx_clip path: OpenAI/LAION CLIP via mlx_clip (ml-7j8.14) ----------------
+# --- mlx_clip path: OpenAI/LAION CLIP via mlx_clip ----------------------------
 #
 # The non-SigLIP path uses the mlx_clip backend for OpenAI/LAION CLIP models.
 # Two things this guards:
@@ -226,7 +226,7 @@ def _bare_mlx_clip(model):
     """Build an mlx_clip-backed MLXClip without real weights.
 
     Leaves _use_mlx_embeddings unset so encode_text/encode_image take the default
-    mlx_clip path (there is no open_clip fallback after ml-b82).
+    mlx_clip path (the open_clip fallback was removed).
     """
     clip = object.__new__(MLXClip)
     clip.model_name = "ViT-B-32__openai"
@@ -286,7 +286,7 @@ def test_mlx_clip_image_embedding_shape_and_normalized():
 def test_mlx_embeddings_map_repos_have_patch_token():
     """The mlx-embeddings loader regex-parses patch/image size from the repo id
     (config.json omits patch_size), so every mapped repo MUST contain a
-    'patchNN-NNN' token or load() crashes. See ml-ycd.1 spike."""
+    'patchNN-NNN' token or load() crashes."""
     pat = re.compile(r"patch\d+-\d+")
     assert MLX_EMBEDDINGS_MAP, "expected at least one native SigLIP2 mapping"
     for name, repo in MLX_EMBEDDINGS_MAP.items():
@@ -298,7 +298,7 @@ def test_mlx_embeddings_map_repos_have_patch_token():
 # A model is served only by a backend whose preprocessing matches Immich's. A
 # native SigLIP2 load failure propagates (nothing serves index-incompatible
 # squash embeddings), an unsupported model raises a clear error, and an unknown
-# name raises rather than degrading to the mlx_clip default (ml-bu1).
+# name raises rather than degrading to the mlx_clip default.
 
 UNSUPPORTED_NAME = "ViT-B-16-SigLIP2__webli"  # mapped to None in MODEL_MAP
 
@@ -371,7 +371,7 @@ def _capture_mlx_clip(monkeypatch):
 
 
 def test_unknown_model_raises_clear_error(monkeypatch):
-    """An unmapped name must raise a clear 'no MLX backend' error (ml-bu1), not
+    """An unmapped name must raise a clear 'no MLX backend' error, not
     silently degrade to the mlx_clip default (ViT-B-32) — a wrong, index-incompatible
     vector. Parity with the None-backend branch. mlx_clip must never be invoked."""
     seen = _capture_mlx_clip(monkeypatch)
@@ -388,8 +388,8 @@ def test_unknown_model_raises_clear_error(monkeypatch):
 
 def test_explicit_default_still_loads(monkeypatch):
     """MODEL_MAP['default'] stays reachable for internal/test use via an explicit
-    'default' request — only *unmapped* names raise (ml-bu1). The default
-    checkpoint reaches mlx_clip as hf_repo, not as the model_dir (ml-7j8.17)."""
+    'default' request — only *unmapped* names raise. The default
+    checkpoint reaches mlx_clip as hf_repo, not as the model_dir."""
     seen = _capture_mlx_clip(monkeypatch)
 
     clip = _bare_for_load("default")
@@ -400,7 +400,7 @@ def test_explicit_default_still_loads(monkeypatch):
     assert clip._loaded is True
 
 
-# --- Wrong-weights regression guard (ml-7j8.17) ------------------------------
+# --- Wrong-weights regression guard ------------------------------------------
 #
 # mlx_clip(model_dir) treats model_dir as a LOCAL dir and, if absent, converts
 # its DEFAULT hf_repo (openai/clip-vit-base-patch32). The old code passed the
@@ -420,7 +420,7 @@ LAION_NAMES = ("ViT-B-32__laion2b-s34b-b79k", "ViT-B-32__laion2b_s34b_b79k")
 def test_openai_variants_convert_correct_weights(monkeypatch, name, expected_repo):
     """OpenAI B-16/L-14 must convert their OWN checkpoint, never the default B-32.
 
-    Guards the ml-7j8.17 bug: the requested hf_repo must be the model-specific
+    Guards the wrong-weights bug: the requested hf_repo must be the model-specific
     OpenAI repo, and it must reach mlx_clip as hf_repo (not as the model_dir, the
     arg that silently fell back to the default checkpoint)."""
     seen = _capture_mlx_clip(monkeypatch)
@@ -452,13 +452,13 @@ def test_laion_variants_fail_loud(monkeypatch, name):
     assert name not in clip_module._supported_model_names()
 
 
-# --- Load-time checkpoint guard (ml-nqd) -------------------------------------
+# --- Load-time checkpoint guard ----------------------------------------------
 #
 # The tests above pin the hf_repo we *request*. This block guards the other
 # half: that the checkpoint mlx_clip *actually loaded* matches it. mlx_clip is a
 # small third-party port (harperreed) whose ctor footgun — an absent cache dir
 # converts the DEFAULT openai/clip-vit-base-patch32 regardless of hf_repo
-# (ml-7j8.17) — could be reintroduced by a version bump even though we now pass
+# — could be reintroduced by a version bump even though we now pass
 # hf_repo correctly. _load_model verifies the loaded vision tower against the
 # arch the repo id encodes (patch size + base/large width) and fails loud on
 # mismatch so wrong weights can't silently poison the smart-search index.
@@ -507,7 +507,7 @@ def test_loaded_checkpoint_matching_arch_loads(monkeypatch, name, repo, patch, h
 
 def test_loaded_checkpoint_wrong_patch_size_raises(monkeypatch):
     """B-16 requested but mlx_clip hands back B-32 (patch32) weights — exactly the
-    ml-7j8.17 silent-wrong-weights footgun. The load must fail loud, naming the
+    silent-wrong-weights footgun. The load must fail loud, naming the
     mismatch, not quietly serve index-incompatible embeddings."""
     # patch16 requested; loaded model reports patch32 (the default-checkpoint bug).
     _patch_mlx_clip_returning(monkeypatch, _fake_loaded_clip(patch_size=32, hidden_size=768))
@@ -549,7 +549,7 @@ def test_loaded_checkpoint_guard_skips_when_unintrospectable(monkeypatch, caplog
     assert any("guard" in r.message.lower() for r in caplog.records), "should warn it could not verify"
 
 
-# --- SigLIP2 tokenizer source resolution (ml-qax) ----------------------------
+# --- SigLIP2 tokenizer source resolution -------------------------------------
 
 
 def test_tokenizer_json_from_local_dir(tmp_path):
@@ -562,7 +562,7 @@ def test_tokenizer_json_from_local_dir(tmp_path):
 def test_tokenizer_json_from_override_repo_not_default(monkeypatch):
     """A non-dir override (custom/quantized HF repo-id) must fetch tokenizer.json
     from THAT repo, not the default SigLIP2 repo — else weights and tokenizer
-    mismatch and query embeddings silently diverge from the index (ml-qax)."""
+    mismatch and query embeddings silently diverge from the index."""
     calls = []
 
     def fake_download(repo_id, filename, *args, **kwargs):

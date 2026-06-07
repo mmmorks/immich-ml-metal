@@ -1,4 +1,4 @@
-"""Tests for scripts/convert_siglip2_mlx.py — ml-98c.
+"""Tests for scripts/convert_siglip2_mlx.py.
 
 Covers the loader-regex guard. The script validates its --mlx-path dir name; this
 adds the same guard for --upload-repo so we never publish a repo whose name lacks
@@ -47,7 +47,7 @@ def test_allows_precision_suffix():
     ["-4bit", "-8bit", "-bf16", "-fp16"],
 )
 def test_allows_publish_naming_suffixes(suffix):
-    """Every mlx-community publish variant (ml-yo9) is dash-introduced, so the
+    """Every mlx-community publish variant is dash-introduced, so the
     loader's ``(?:-|$)`` anchor matches and the guard must accept it."""
     mod._require_patch_token(f"mlx-community/siglip2-so400m-patch16-384{suffix}", "--upload-repo")
 
@@ -59,7 +59,7 @@ def test_allows_publish_naming_suffixes(suffix):
 def test_rejects_trailing_junk_after_token(name):
     """Names where the patch digits are followed by non-dash junk PASS a guard
     without the ``(?:-|$)`` anchor but CRASH the loader (group(1) -> AttributeError
-    in mlx_embeddings utils.py); the fixed guard must fail-fast on them. ml-t4e."""
+    in mlx_embeddings utils.py); the fixed guard must fail-fast on them."""
     with pytest.raises(ValueError, match="patch"):
         mod._require_patch_token(f"mmmorks/{name}", "--upload-repo")
 
@@ -74,7 +74,7 @@ def test_error_message_names_the_flag():
         mod._require_patch_token("mmmorks/my-weights", "--upload-repo")
 
 
-# --- --upload-repo on an already-complete cache (ml-5zl) -------------------
+# --- --upload-repo on an already-complete cache ---------------------------
 
 
 def test_upload_existing_reads_config_and_uploads(tmp_path, monkeypatch):
@@ -99,7 +99,7 @@ def test_upload_existing_reads_config_and_uploads(tmp_path, monkeypatch):
 
 
 def test_main_uploads_when_cache_complete(tmp_path, monkeypatch):
-    """The ml-5zl regression: with a complete cache and no --force, passing
+    """The regression: with a complete cache and no --force, passing
     --upload-repo must still publish (not silently return 0 with only a note)."""
     out = tmp_path / "siglip2-so400m-patch16-384"
     out.mkdir()

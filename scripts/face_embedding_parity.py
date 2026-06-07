@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Face-embedding parity harness: fork (Apple Vision landmarks) vs upstream (SCRFD/RetinaFace landmarks).
 
-Gate for ml-7j8.13. Decides preserve-vs-reindex for Immich's existing FACE
+Parity gate. Decides preserve-vs-reindex for Immich's existing FACE
 index (and clusters) after migrating to this fork's Apple-Vision face pipeline.
 
 WHAT ACTUALLY DIFFERS
@@ -21,8 +21,8 @@ The ONLY variable is the **5-point landmarks** fed into ``norm_crop``:
   what upstream/Docker Immich runs) emits 5 keypoints directly.
 * ``fork``     — ``src.models.face_detect`` reconstructs 5 points from Apple
   Vision face-landmark *contours* (eye centers, nose anchor, mouth corners =
-  min/max-x of outerLips). The nose anchor is selectable via ``--nose``
-  (ml-eo4): ``tip`` (last nose-contour point — the production default that built
+  min/max-x of outerLips). The nose anchor is selectable via ``--nose``:
+  ``tip`` (last nose-contour point — the production default that built
   the existing index) or ``center`` (nose-contour centroid, more robust on
   non-frontal poses). ``--nose both`` runs each and compares median drift. See
   ``face_detect.py``.
@@ -71,7 +71,7 @@ Usage (from ml/, venv active):
     .venv/bin/python scripts/face_embedding_parity.py                  # LFW subset
     .venv/bin/python scripts/face_embedding_parity.py --num-ids 60     # bigger sample
     .venv/bin/python scripts/face_embedding_parity.py --images ~/faces # real library
-    .venv/bin/python scripts/face_embedding_parity.py --nose both       # tip vs centroid drift (ml-eo4)
+    .venv/bin/python scripts/face_embedding_parity.py --nose both       # tip vs centroid drift
     .venv/bin/python scripts/face_embedding_parity.py --report out.md
 
 Apple Vision is required (the fork pipeline), so this only runs on macOS.
@@ -281,7 +281,7 @@ def fork_faces(image_bytes: bytes, nose_strategy: str = "tip") -> list[dict]:
 
     ``nose_strategy`` selects the nose anchor for the reconstructed 5-point
     landmarks (see ``face_detect.NOSE_STRATEGIES``): "tip" reproduces the
-    production index (last nose-contour point); "center" is the ml-eo4 candidate
+    production index (last nose-contour point); "center" is the candidate
     (nose-contour centroid) measured here for alignment drift on hard poses.
     """
     from src.models.face_detect import detect_faces
@@ -442,7 +442,7 @@ def main() -> int:
         choices=["tip", "center", "both"],
         default="tip",
         help="fork nose-anchor strategy: 'tip' (production, last contour point), "
-        "'center' (ml-eo4 candidate, contour centroid), or 'both' to compare drift (default: tip)",
+        "'center' (candidate, contour centroid), or 'both' to compare drift (default: tip)",
     )
     args = ap.parse_args()
 
@@ -547,7 +547,7 @@ def main() -> int:
         rc_by_strategy[strategy] = rc
         median_by_strategy[strategy] = median
 
-    # --- nose-strategy comparison (ml-eo4): does the centroid reduce drift? ---
+    # --- nose-strategy comparison: does the centroid reduce drift? ---
     if len(strategies) > 1 and all(np.isfinite(median_by_strategy[s]) for s in strategies):
         emit()
         emit("### Nose-anchor comparison (higher median drift cosine = better alignment)")

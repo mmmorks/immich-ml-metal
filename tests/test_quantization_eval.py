@@ -1,4 +1,4 @@
-"""Tests for scripts/quantization_eval.py — ml-383.
+"""Tests for scripts/quantization_eval.py.
 
 Covers two edge bugs:
 

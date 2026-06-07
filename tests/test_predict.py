@@ -63,7 +63,7 @@ SECRET = "/Users/secret/path/model.bin not found"
 
 @pytest.mark.asyncio
 async def test_health_hides_error_details_without_debug(client, monkeypatch):
-    """ml-7j8.8: /health must not leak raw exception strings when debug_mode is off."""
+    """/health must not leak raw exception strings when debug_mode is off."""
     import src.main as main
 
     monkeypatch.setattr(main, "STUB_MODE", False)
@@ -83,7 +83,7 @@ async def test_health_hides_error_details_without_debug(client, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_health_reuses_loaded_clip_model(client, monkeypatch):
-    """ml-atc: /health must probe the already-loaded CLIP model, not switch to
+    """/health must probe the already-loaded CLIP model, not switch to
     settings.clip_model — otherwise it evicts the production model (e.g. SigLIP2)
     from the single CLIP slot on every probe and thrashes the cache."""
     import src.main as main
@@ -204,7 +204,7 @@ async def test_predict_faces(client, test_image_bytes):
     assert "embedding" in faces[0]
     assert "score" in faces[0]
     # The face embedding must be a JSON string (same contract as the CLIP path),
-    # not a Python repr — str(list) emits non-JSON 'nan'/'inf' tokens (ml-7j8.15).
+    # not a Python repr — str(list) emits non-JSON 'nan'/'inf' tokens.
     face_embedding = json.loads(faces[0]["embedding"])
     assert isinstance(face_embedding, list)
     assert len(face_embedding) == 512
@@ -304,7 +304,7 @@ async def test_predict_empty_tasks(client, test_image_bytes):
     assert "clip" not in data
 
 
-# --- Backpressure & timeout (ml-7j8.2) ---
+# --- Backpressure & timeout ---
 
 
 @pytest.fixture

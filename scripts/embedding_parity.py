@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Embedding-parity harness: native MLX SigLIP2 vs the reference impl the NAS uses.
 
-Gate for ml-ycd.2. Decides preserve-vs-reindex for Immich's existing
+Parity gate. Decides preserve-vs-reindex for Immich's existing
 smart-search index (4716 rows built with ``ViT-SO400M-16-SigLIP2-384__webli``).
 
 It embeds the SAME images + text queries through several backends and reports
@@ -18,7 +18,7 @@ per-item cosine similarity:
                      4716 vectors stay valid (preserve, no re-index).
 * ``transformers`` — HF ``SiglipModel`` (same weights) with HF's squash + no
                      text-canonicalize preprocessing. This is what ``clip.py``
-                     did BEFORE ml-ycd.4, so it's a *regression witness*: a low
+                     did BEFORE the preprocessing-parity fix, so it's a *regression witness*: a low
                      MLX-vs-transformers score is the size of the preprocessing
                      bug the Immich-faithful path fixed (not a port problem —
                      the ``immich`` comparison, identical preprocessing on both
@@ -279,7 +279,7 @@ def embed_hf(
                        preprocessing — image AND text, incl. caps/punctuation.
                        THE GATE.
       "transformers" — HF SiglipProcessor (squash images, no text canonicalize).
-                       This is what clip.py used BEFORE ml-ycd.4, so MLX-vs-this
+                       This is what clip.py used BEFORE the preprocessing-parity fix, so MLX-vs-this
                        isolates pure port fidelity from the preprocessing change.
     """
     import torch
@@ -389,7 +389,7 @@ def main() -> int:
         default=["immich"],
         help="reference backend(s). 'immich'=Immich server transform (the gate "
         "AND port fidelity, since both sides share production preprocessing); "
-        "'transformers'=HF squash (regression witness for the pre-ml-ycd.4 path); "
+        "'transformers'=HF squash (regression witness for the pre-parity-fix path); "
         "'openclip'=open_clip's own torchvision transform (diagnostic only)",
     )
     ap.add_argument("--device", default="cpu", choices=["cpu", "mps"], help="torch device for references")
@@ -492,7 +492,7 @@ def main() -> int:
         emit("  clip.py uses HF SiglipProcessor (squash to 384^2) but the Immich")
         emit("  server resizes the shortest side to 384 then center-crops. On")
         emit("  non-square photos these feed different pixels to an identical model.")
-        emit("  => ml-ycd.4: make clip.py replicate Immich's transform (PIL bicubic")
+        emit("  => Fix: make clip.py replicate Immich's transform (PIL bicubic")
         emit("     resize-shortest + center-crop, normalize 0.5). That reproduces the")
         emit("     index embeddings (~1.0) and PRESERVES the existing 4716 rows.")
         verdict_rc = 0
