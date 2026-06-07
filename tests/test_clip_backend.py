@@ -23,6 +23,7 @@ import os
 import re
 import threading
 
+import mlx.core as mx
 import numpy as np
 import pytest
 from PIL import Image
@@ -172,6 +173,111 @@ def test_siglip2_text_zero_embedding_does_not_nan():
     assert emb.shape == (SIGLIP2_DIM,)
     assert not np.isnan(emb).any(), "zero embedding must not normalize to NaN"
     assert np.all(emb == 0.0), "a zero raw output should stay zero, not become NaN"
+
+
+# --- mlx_clip path: OpenAI/LAION CLIP via mlx_clip (ml-7j8.14) ----------------
+#
+# The non-SigLIP path uses the mlx_clip backend for OpenAI/LAION CLIP models.
+# Two things this guards:
+#   * TEXT must be whitespace-canonicalized (Immich clean_text(canonicalize=False))
+#     BEFORE tokenization so query embeddings line up with the Immich server's.
+#     canonicalize=False (whitespace only, no lowercase/punctuation strip) because
+#     OpenAI/LAION BPE is case- and punctuation-bearing, unlike SigLIP.
+#   * The text path must return a normalized float32 ndarray. mlx_clip's
+#     high-level text_encoder() returns a Python list (.tolist()), which then
+#     breaks _l2_normalize/.flatten(); the path uses the low-level
+#     model(input_ids=...) instead, mirroring the image path.
+
+
+class _FakeMlxClipModel:
+    """Stand-in for mlx_clip's loaded model.
+
+    Records the text seen at BOTH the tokenizer (the low-level path the fixed
+    code uses) and text_encoder (the legacy list-returning high-level call), so a
+    test can assert whitespace canonicalization regardless of which is invoked.
+    ``model(input_ids=...)`` returns a fixed raw mx.array as ``text_embeds[0]``,
+    matching how clip.py forces lazy Metal eval via np.array().
+    """
+
+    def __init__(self, raw):
+        self._raw = mx.array(np.asarray(raw, dtype=np.float32))
+        self.seen: list[str] = []
+
+    # Legacy high-level API (pre-fix code calls this) — returns a Python list.
+    def text_encoder(self, text):
+        self.seen.append(text)
+        return np.asarray(self._raw).tolist()
+
+    # Low-level APIs used by the image path and the fixed text path.
+    def tokenizer(self, texts):
+        self.seen.append(texts[0] if isinstance(texts, list) else texts)
+        return [[1, 2, 3]]  # dummy ids; the fake model ignores them
+
+    def img_processor(self, images):
+        return "pixels"  # ignored by the fake model
+
+    def model(self, input_ids=None, pixel_values=None):
+        import types
+
+        return types.SimpleNamespace(text_embeds=[self._raw], image_embeds=[self._raw])
+
+
+def _bare_mlx_clip(model):
+    """Build an mlx_clip-backed MLXClip without real weights.
+
+    Leaves _use_mlx_embeddings unset so encode_text/encode_image take the default
+    mlx_clip path (there is no open_clip fallback after ml-b82).
+    """
+    clip = object.__new__(MLXClip)
+    clip.model_name = "ViT-B-32__openai"
+    clip._model = model
+    clip._loaded = True
+    clip._inference_lock = threading.Lock()
+    return clip
+
+
+def test_mlx_clip_text_embedding_shape_and_normalized():
+    raw = np.arange(1, 9, dtype=np.float32)  # non-unit, non-uniform
+    clip = _bare_mlx_clip(_FakeMlxClipModel(raw))
+
+    emb = clip.encode_text("a photo of a cat")
+
+    assert emb.shape == (8,)
+    assert emb.dtype == np.float32
+    assert np.linalg.norm(emb) == pytest.approx(1.0, abs=1e-5)
+    assert np.allclose(emb, raw / np.linalg.norm(raw), atol=1e-6)
+
+
+def test_mlx_clip_text_path_canonicalizes_whitespace():
+    model = _FakeMlxClipModel(np.arange(1, 9, dtype=np.float32))
+    clip = _bare_mlx_clip(model)
+
+    clip.encode_text("  a   photo\tof\na cat \n")
+
+    assert model.seen == ["a photo of a cat"], f"text must be whitespace-canonicalized before tokenization, got {model.seen!r}"
+
+
+def test_mlx_clip_text_zero_embedding_does_not_nan():
+    clip = _bare_mlx_clip(_FakeMlxClipModel(np.zeros(8, dtype=np.float32)))
+
+    emb = clip.encode_text("a photo of a cat")
+
+    assert not np.isnan(emb).any(), "zero embedding must not normalize to NaN"
+    assert np.all(emb == 0.0), "a zero raw output should stay zero, not become NaN"
+
+
+def test_mlx_clip_image_embedding_shape_and_normalized():
+    """Characterization of the already-working mlx_clip IMAGE path the parity
+    gate relies on (the gate's mlxclip backend calls encode_image)."""
+    raw = np.arange(1, 9, dtype=np.float32)
+    clip = _bare_mlx_clip(_FakeMlxClipModel(raw))
+
+    emb = clip.encode_image(_red_jpeg())
+
+    assert emb.shape == (8,)
+    assert emb.dtype == np.float32
+    assert np.linalg.norm(emb) == pytest.approx(1.0, abs=1e-5)
+    assert np.allclose(emb, raw / np.linalg.norm(raw), atol=1e-6)
 
 
 # --- Name mapping invariants -------------------------------------------------

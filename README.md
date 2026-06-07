@@ -126,11 +126,15 @@ Configure via environment variables or edit `src/config.py`:
     [Native SigLIP2 backend](#native-siglip2-backend) below.
 
 - OpenAI CLIP models -> MLX (via [mlx_clip](https://github.com/harperreed/mlx_clip))
-  - `ViT-B-32__openai` -> `mlx-community/clip-vit-base-patch32`
-  - `ViT-B-16__openai`-> `mlx-community/clip-vit-base-patch16`
-  - `ViT-L-14__openai`-> `mlx-community/clip-vit-large-patch14`
+  - `ViT-B-32__openai` -> `mlx-community/clip-vit-base-patch32` — ✅ **verified
+    index-compatible** (see [CLIP parity](#clip-parity-mlx_clip-path) below)
+  - `ViT-B-16__openai`-> `mlx-community/clip-vit-base-patch16` — ⚠️ **not
+    index-faithful** (see [CLIP parity](#clip-parity-mlx_clip-path))
+  - `ViT-L-14__openai`-> `mlx-community/clip-vit-large-patch14` — ⚠️ **not
+    index-faithful**
 
-- LAION CLIP models -> MLX
+- LAION CLIP models -> MLX — ⚠️ **not index-faithful** (see
+  [CLIP parity](#clip-parity-mlx_clip-path))
   - `ViT-B-32__laion2b-s34b-b79k`-> `mlx-community/clip-vit-base-patch32-laion2b`
   - `ViT-B-32__laion2b_s34b_b79k`-> `mlx-community/clip-vit-base-patch32-laion2b`
 
@@ -143,6 +147,32 @@ Configure via environment variables or edit `src/config.py`:
 The ViT-B-16 SigLIP variants have no MLX backend, so requesting one raises a clear
 "no MLX backend" error rather than silently serving non-parity embeddings (see
 [Parity-or-fail](#parity-or-fail)).
+
+#### CLIP parity (mlx_clip path)
+
+Unlike SigLIP2, the OpenAI/LAION CLIP models run through mlx_clip's own image
+processor and BPE tokenizer rather than the Immich-faithful `immich_preprocess`
+path, so their index-compatibility is checked by a dedicated gate,
+`scripts/clip_parity.py` — the production mlx_clip path vs the same open_clip
+checkpoint (the one Immich exports to ONNX) run through Immich's *exact* transform.
+
+- **`ViT-B-32__openai`: verified drop-in, no re-index.** Image **and** text cosine
+  `1.0000` (12 photos × 12 queries), top-1 retrieval agreement `1.000`, vs both the
+  Immich-transform reference and open_clip's own transform. The mlx_clip path
+  applies `clean_text(canonicalize=False)` then mlx_clip's CLIP BPE tokenizer
+  (whitespace-only canonicalization — OpenAI BPE is case/punctuation-bearing,
+  unlike SigLIP), and resize-shortest-224 + center-crop + CLIP-normalize for
+  images — reproducing the standard Immich server.
+- **`ViT-B-16__openai`, `ViT-L-14__openai`, `ViT-B-32__laion2b-*`: NOT
+  index-faithful — do not rely on them as drop-ins.** `MLXClip._load_model` calls
+  `mlx_clip(repo_id)` without `hf_repo`, so any model whose local cache dir is
+  absent converts the **default** `openai/clip-vit-base-patch32` instead of the
+  intended weights (the gate measures **~0 cosine** vs the correct reference for the
+  LAION model). LAION additionally needs standard GELU, but mlx_clip hardcodes
+  `quick_gelu`. The fix (tracked as a follow-up) is to pass the correct `hf_repo`
+  for the OpenAI B-16/L-14 ports and mark LAION unsupported — there is no open_clip
+  fallback to route to anymore. Re-check any model with
+  `.venv/bin/python scripts/clip_parity.py --model <name>`.
 
 ### Native SigLIP2 backend
 

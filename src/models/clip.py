@@ -20,7 +20,7 @@ import mlx.core as mx
 import numpy as np
 from PIL import Image
 
-from src.models.immich_preprocess import siglip_image_pixels
+from src.models.immich_preprocess import clean_text, siglip_image_pixels
 
 logger = logging.getLogger(__name__)
 
@@ -486,15 +486,30 @@ class MLXClip:
         if getattr(self, "_use_mlx_embeddings", False):
             return self._encode_text_siglip2(text)
 
-        with self._inference_lock:
-            model_ref = self._model
-            if model_ref is None:
-                raise RuntimeError("CLIP model was unloaded during a concurrent model switch")
-            embedding = model_ref.text_encoder(text)
+        # mlx_clip path (OpenAI/LAION CLIP). Apply Immich's clean_text
+        # canonicalization BEFORE tokenization so query embeddings line up with
+        # the standard Immich server's. canonicalize=False (collapse whitespace
+        # only — no lowercase/punctuation strip): unlike SigLIP, the OpenAI/LAION
+        # BPE tokenizer is case- and punctuation-bearing, so only whitespace is
+        # canonicalized (ml-7j8.14). Use the low-level model(input_ids=...) and
+        # take text_embeds[0]; mlx_clip's high-level text_encoder() returns a
+        # Python list, which breaks _l2_normalize/.flatten(). This mirrors the
+        # image path: tokenization is CPU-only and runs outside the lock, with
+        # one retry on a concurrent model swap.
+        def prepare(model_ref):
+            return model_ref.tokenizer([clean_text(text, canonicalize=False)])
+
+        def run(model_ref, input_ids):
+            output = model_ref.model(input_ids=input_ids)
+            embedding = output.text_embeds[0]
+            # Force Metal evaluation inside the lock — MLX arrays are lazy.
             if isinstance(embedding, mx.array):
                 embedding = np.array(embedding)
-            embedding = _l2_normalize(embedding)
-            return embedding.flatten().astype(np.float32)
+            return embedding
+
+        embedding = self._infer_with_swap_retry("tokenization", prepare, run)
+        embedding = _l2_normalize(embedding)
+        return embedding.flatten().astype(np.float32)
 
     def _encode_text_siglip2(self, text: str) -> np.ndarray:
         """Encode text via the native MLX SigLIP2 backend (mlx-embeddings).
