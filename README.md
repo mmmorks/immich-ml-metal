@@ -366,6 +366,38 @@ So:
 regression witness for the squash-vs-crop divergence); `pip install open-clip-torch`
 to run it.
 
+#### Automated parity gate (committed golden references)
+
+The manual `*_parity.py` scripts need a human to supply `--images`, so a parity
+regression is invisible to automation. A committed-golden gate closes that gap:
+
+- **Fixtures** (`tests/fixtures/`): ~8 public-domain CLIP photos, a fixed query
+  list, and a tiny LFW face subset — all committed, so the gate is hermetic.
+- **Golden references** (`tests/fixtures/golden/*.npz`): embeddings frozen from
+  the literal upstream ONNX models Immich ships (the `immich-app/*` exports and
+  insightface `buffalo_l`), generated once via
+  `.venv/bin/python scripts/gen_parity_golden.py` and committed with a `.json`
+  manifest (ONNX repo + resolved commit SHA, onnxruntime version, dim, date).
+  Regenerating the `openai_clip` golden needs `pip install open-clip-torch`.
+- **Gated tests** assert the MLX production backends stay faithful to those
+  goldens: `tests/test_clip_golden_parity.py` (SigLIP2 + OpenAI-CLIP image/text
+  cosine ≥ 0.99) and `tests/test_face_golden_parity.py` (Apple-Vision fork vs
+  SCRFD/ArcFace golden: median alignment-drift cosine ≥ 0.90, top-1 retrieval
+  drop ≤ 0.02).
+
+The gate auto-detects availability: it **skips** when the native deps/weights or
+golden artifacts are absent (e.g. a non-Apple-Silicon CI lane), so a plain
+`.venv/bin/python -m pytest` stays green everywhere. Set `ML_RUN_PARITY=1` to
+turn a missing prerequisite into a **hard failure** instead — so a CI lane that
+should run the gate can't silently skip it:
+
+```bash
+ML_RUN_PARITY=1 .venv/bin/python -m pytest tests/test_clip_golden_parity.py tests/test_face_golden_parity.py
+```
+
+The `*_parity_harness.py` tests cover only the harness math (cosine, IoU,
+retrieval); model-output parity lives in the golden gate above.
+
 **Face Models**:
 - `buffalo_s`
 - `buffalo_m`
