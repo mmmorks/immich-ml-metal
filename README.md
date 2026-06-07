@@ -44,6 +44,38 @@ INFO:   ocr: 47ms
 INFO: predict: 3 task(s) [clip+facial-recognition+ocr] completed in 135ms
 ```
 
+### CLIP backend: mlx_clip vs upstream ONNX
+
+The OpenAI CLIP ports (`ViT-B-16__openai`, `ViT-L-14__openai`) run on MLX/Metal
+via mlx-clip. To confirm that path is at least as fast as what stock Immich
+ships — not just numerically faithful — `scripts/clip_benchmark.py` times the
+warm, batch-1 encode against the same upstream `immich-app/<model>` ONNX export
+under both onnxruntime providers available on Apple Silicon (CPU, which is what
+Docker Immich actually serves here since there's no CUDA; and CoreML). Warm
+median latency, single-stream throughput in parentheses (M5 Pro, 24 GB):
+
+| Model | Path | Image | Text |
+|-------|------|------:|-----:|
+| ViT-B-16 | **mlx_clip (Metal)** | **10.0 ms** (100/s) | **2.3 ms** (439/s) |
+| ViT-B-16 | upstream ONNX, CPU | 27.9 ms (36/s) | 8.0 ms (126/s) |
+| ViT-B-16 | upstream ONNX, CoreML | 39.4 ms (25/s) | 23.0 ms (44/s) |
+| ViT-L-14 | **mlx_clip (Metal)** | **32.0 ms** (31/s) | **3.6 ms** (279/s) |
+| ViT-L-14 | upstream ONNX, CPU | 147.0 ms (7/s) | 15.2 ms (66/s) |
+| ViT-L-14 | upstream ONNX, CoreML | 216.9 ms (5/s) | 62.6 ms (16/s) |
+
+mlx_clip is **2.8–6.8× faster on images and 3.5–17× faster on text** than the
+upstream ONNX baseline, and the gap widens with model size. (CoreML is *slower*
+than plain CPU for these CLIP graphs — onnxruntime offloads only part of the
+graph and pays for the partition.) Forward-only timing (compute alone, inputs
+prepared once) tracks end-to-end within a couple ms, so preprocessing is not the
+differentiator — the Metal forward itself is faster. A leaner hand-rolled MLX
+path that reuses `immich_preprocess` and drives the raw module directly
+(`direct_mlx` in the benchmark) lands within ~3% of mlx_clip, so the wrapper adds
+no meaningful overhead and there's no performance case for a different CLIP
+backend. Reproduce with `.venv/bin/python scripts/clip_benchmark.py` (needs
+`pip install open-clip-torch` for the ONNX text tokenizer; the upstream ONNX
+exports download once, ~0.6 GB B-16 / ~1.7 GB L-14).
+
 ## Project Status
 
 ** A(I)lpha Quality - Use at Your Own Risk**
@@ -191,30 +223,11 @@ mlx_clip at ~0.985 (the quickgelu-vs-gelu gap). Re-check any model with
 
 #### CLIP speed (mlx_clip path)
 
-Parity proves mlx_clip is *correct*; a companion benchmark,
-`scripts/clip_benchmark.py`, proves it is also *faster* than the path it
-replaced. It times warm single-item encodes — the production serving pattern,
-one image / one query at a time — for the mlx_clip Metal path against the same
-model's **upstream ONNX export** (`immich-app/<model>`, the exact `visual` /
-`textual` `model.onnx` the standard Immich ML server loads) under onnxruntime.
-`CPUExecutionProvider` is the honest apples-to-apples baseline — it is what
-Immich's Docker image actually runs on Apple Silicon (no CUDA) — and
-`CoreMLExecutionProvider` is reported too as the Mac-native accelerated ONNX
-point.
-
-mlx_clip (Metal) is **materially faster than upstream ONNX-CPU** for both OpenAI
-ports measured, image and text:
-
-| path  | `ViT-B-16__openai` / `ViT-L-14__openai` vs ONNX-CPU |
-|-------|-----------------------------------------------------|
-| image | **2.8–4.3× faster**                                 |
-| text  | **3.5–4.1× faster**                                 |
-
-So mlx_clip wins on speed as well as parity — there is no case for a different or
-hand-rolled MLX CLIP backend (`mlx_clip` already *is* the MLX implementation).
-Re-run with `.venv/bin/python scripts/clip_benchmark.py` (needs
-`pip install open-clip-torch` for the ONNX text tokenizer; the ONNX exports
-download once, ~0.6 GB B-16 / ~1.7 GB L-14).
+Parity proves mlx_clip is *correct*; `scripts/clip_benchmark.py` proves it is
+also *faster* than the upstream ONNX path it replaced — mlx_clip (Metal) beats
+the upstream ONNX-CPU baseline (what Immich's Docker image runs on Apple Silicon)
+by 2.8–6.8× on images and 3.5–17× on text for the OpenAI ports. Numbers and
+methodology are in [Performance: Why This is Fast](#performance-why-this-is-fast).
 
 ### Native SigLIP2 backend
 

@@ -1,49 +1,58 @@
 #!/usr/bin/env python3
 """CLIP throughput/latency benchmark: the production mlx_clip path vs upstream ONNX.
 
-The companion ``clip_parity.py`` proved mlx_clip is *correct* (cosine 1.0000 vs
-the open_clip checkpoint Immich exports to ONNX) for the OpenAI CLIP ports, but
-speed was never measured. This harness answers the open question from that work:
-is mlx_clip's MLX/Metal path actually "in line with upstream performance", or
-materially slower than the standard Immich ML server's ONNX path?
+Parity is already settled — ``clip_parity.py`` shows mlx_clip is cosine-1.0000
+faithful to the Immich server for the OpenAI CLIP ports. The open question this
+harness answers is SPEED: is mlx_clip's MLX/Metal path actually "in line with
+upstream performance", or materially slower than what Immich already ships? A
+material slowdown would be the only reason to consider a different backend
+(parity gives no reason). Immich's DEFAULT model is SigLIP2 (a separate native
+backend), so the OpenAI CLIP ports benchmarked here are a SECONDARY path.
 
-It times WARM single-item encodes — the production serving pattern, where Immich
-sends one image (or one text query) at a time — for both backends and reports
-median/p90 latency and throughput (items/s):
+It times warm single-item (batch=1, the serving pattern) image and text encodes
+for each backend and reports median/mean/p90 latency and sustained throughput,
+both END-TO-END (decode + preprocess + forward + L2 — the real serving cost) and
+FORWARD-ONLY (the Metal/ORT compute alone, inputs prepared once) so the gap
+between them attributes how much of each path is CPU preprocessing:
 
-* ``mlx_clip`` — THE CANDIDATE: the production path (``src.models.clip`` ->
-                 mlx_clip backend) running on the Apple-Silicon GPU via Metal.
-                 Timed two ways: END-TO-END (the public ``encode_image`` /
-                 ``encode_text`` — decode + preprocess + Metal forward + L2) and
-                 FORWARD-ONLY (just the Metal forward, preprocessing factored
-                 out) to localise where the time goes.
-* ``onnx``     — THE BASELINE: the SAME model's upstream ONNX export
-                 (``immich-app/<model>`` on the Hub — ``visual/model.onnx`` +
-                 ``textual/model.onnx``, the exact files the standard Immich ML
-                 server loads) under onnxruntime. Run on every requested
-                 execution provider. ``CPUExecutionProvider`` is what Immich
-                 actually uses in its Docker image on Apple-Silicon (no CUDA),
-                 so it is the honest apples-to-apples baseline;
-                 ``CoreMLExecutionProvider`` is reported too as the Mac-native
-                 accelerated ONNX point.
+* ``mlx_clip``    — THE CANDIDATE: the exact production path,
+                    ``src.models.clip.MLXClip.encode_image/encode_text`` (Metal,
+                    incl. the metal-lock + swap-retry scaffolding a real request
+                    pays).
+* ``direct_mlx``  — the SAME converted MLX weights, but driven leanly: Immich's
+                    ``immich_preprocess`` (siglip_image_pixels / clean_text) feeding
+                    the raw mlx_clip ``nn.Module`` directly, bypassing mlx_clip's
+                    own CLIPImageProcessor/tokenizer wrappers and the production
+                    lock. Isolates how much of mlx_clip's cost is wrapper overhead
+                    vs. the Metal compute itself — i.e. whether a "direct MLX impl
+                    reusing immich_preprocess" could be faster.
+* ``onnx_cpu``    — THE UPSTREAM BASELINE Immich actually runs on a Mac: the
+                    published ``immich-app/<model>`` ONNX export under
+                    onnxruntime's CPUExecutionProvider (Docker Immich on Apple
+                    Silicon has no CUDA, so it serves CPU ONNX).
+* ``onnx_coreml`` — the same ONNX export under CoreMLExecutionProvider — the best
+                    onnxruntime can do on Apple Silicon (ANE/GPU), the closest
+                    GPU-vs-GPU comparison against mlx_clip's Metal path.
 
-Note: Immich's DEFAULT model is SigLIP2 (native mlx-embeddings backend), so the
-OpenAI CLIP ports benchmarked here are a SECONDARY path — scope conclusions
-accordingly. The "direct-MLX baseline" the bead mentions (a hand-rolled MLX CLIP
-reusing immich_preprocess) does not exist; mlx_clip *is* the MLX implementation,
-so the meaningful comparison is mlx_clip(Metal) vs ONNX(CPU/CoreML). Building a
-faster MLX backend is only worth it if mlx_clip loses badly to ONNX here.
+All backends consume identical JPEG bytes and identical query strings, take the
+batch-1 single-item path, and L2-normalize the output, so the numbers are
+apples-to-apples on ONE Apple-Silicon Mac. Backends load and free sequentially to
+bound peak memory; mlx_clip and direct_mlx share one loaded model.
 
-Backends load -> warm up -> time -> free sequentially, bounding peak memory so
-this runs on a single Mac.
+A cosine sanity-check (each backend vs mlx_clip on the first item) guards against
+timing a broken/mismatched path — a wrong preprocessing layout or wrong
+checkpoint collapses cosine toward 0. Note ``direct_mlx`` is ~1.0000 (same
+weights), but the ONNX backends land near ~0.97: that is the upstream ONNX
+export's OWN numerical drift from the open_clip/MLX reference (verified — our
+siglip preprocessing is cosine-1.0000 to open_clip's own transform), not a
+benchmark error. The two backends still run the identical ViT forward over the
+identical input, so the LATENCY is comparable regardless.
 
 Usage (from ml/, venv active):
 
-    .venv/bin/python scripts/clip_benchmark.py                          # both default models, download a sample image
-    .venv/bin/python scripts/clip_benchmark.py --image ~/Pics/cat.jpg   # a real library photo
-    .venv/bin/python scripts/clip_benchmark.py --models ViT-B-16__openai
-    .venv/bin/python scripts/clip_benchmark.py --providers CPUExecutionProvider CoreMLExecutionProvider
-    .venv/bin/python scripts/clip_benchmark.py --no-onnx                # mlx_clip numbers only (no download)
+    .venv/bin/python scripts/clip_benchmark.py                       # B-16 + L-14, sample images
+    .venv/bin/python scripts/clip_benchmark.py --images ~/Pics       # real library photos
+    .venv/bin/python scripts/clip_benchmark.py --models ViT-B-16__openai --repeats 12
     .venv/bin/python scripts/clip_benchmark.py --report bench.md
 """
 
@@ -52,7 +61,6 @@ from __future__ import annotations
 import argparse
 import gc
 import io
-import statistics
 import sys
 import time
 from pathlib import Path
@@ -60,8 +68,8 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-# Make ``src`` importable and reuse the parity harnesses' helpers (scripts/ is
-# not a package, so add both dirs to the path).
+# Make ``src`` importable and the sibling ``embedding_parity`` helpers reusable
+# (scripts/ is not a package, so add both dirs to the path).
 ML_ROOT = Path(__file__).resolve().parent.parent
 if str(ML_ROOT) not in sys.path:
     sys.path.insert(0, str(ML_ROOT))
@@ -69,215 +77,338 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from clip_parity import CLIP_IMAGE_SIZE, CLIP_MEAN, CLIP_STD, _reference_arch
-from embedding_parity import load_images
+from embedding_parity import DEFAULT_QUERIES, cosine, load_images
 
+# OpenAI CLIP preprocessing constants — image size 224, OpenAI CLIP mean/std.
+# These are what Immich's OpenClipVisualEncoder uses for the OpenAI CLIP models.
+CLIP_IMAGE_SIZE = 224
+CLIP_MEAN = (0.48145466, 0.4578275, 0.40821073)
+CLIP_STD = (0.26862954, 0.26130258, 0.27577711)
+
+# Immich CLIP name -> the upstream HF repo holding its ONNX export, plus the
+# open_clip arch whose tokenizer matches it (for the ONNX text input). Only the
+# mlx_clip-backed OpenAI ports are benchmarked — LAION/SigLIP have no mlx_clip
+# backend (see src/models/clip.py MODEL_MAP).
+ONNX_REPO = {
+    "ViT-B-16__openai": ("immich-app/ViT-B-16__openai", "ViT-B-16-quickgelu"),
+    "ViT-L-14__openai": ("immich-app/ViT-L-14__openai", "ViT-L-14-quickgelu"),
+}
 DEFAULT_MODELS = ["ViT-B-16__openai", "ViT-L-14__openai"]
-DEFAULT_QUERY = "a photo of a dog playing in the park"
 
 
 # --------------------------------------------------------------------------- #
-# Timing
+# Timing helper
 # --------------------------------------------------------------------------- #
-def _bench(fn, warmup: int, iters: int) -> dict[str, float]:
-    """Run ``fn`` ``warmup`` times (untimed) then ``iters`` times (timed).
+def _time_calls(fn, items: list, warmup: int, repeats: int) -> dict:
+    """Time ``fn(item)`` over ``repeats`` passes of ``items`` after ``warmup`` passes.
 
-    Returns latency stats in milliseconds plus throughput in items/s. ``fn``
-    must fully realise its result (e.g. force lazy MLX eval) so the timing
-    captures real compute, not deferred work.
+    ``fn`` MUST force the backend's lazy work to complete before returning (e.g.
+    materialize the MLX array to numpy / run the ORT session), so each timed call
+    captures the full encode cost. Returns latency stats (ms) and throughput.
     """
+    # Warmup: triggers lazy MLX compile, Metal allocation, and ORT graph
+    # optimization so the timed passes measure the warm steady state.
     for _ in range(warmup):
-        fn()
-    samples = []
-    for _ in range(iters):
-        t0 = time.perf_counter()
-        fn()
-        samples.append((time.perf_counter() - t0) * 1000.0)
-    samples.sort()
-    median = statistics.median(samples)
-    p90 = samples[min(len(samples) - 1, round(0.9 * (len(samples) - 1)))]
+        for it in items:
+            fn(it)
+
+    latencies_ms: list[float] = []
+    for _ in range(repeats):
+        for it in items:
+            t0 = time.perf_counter()
+            fn(it)
+            latencies_ms.append((time.perf_counter() - t0) * 1000.0)
+
+    arr = np.array(latencies_ms)
+    median = float(np.median(arr))
     return {
+        "n": len(arr),
         "median_ms": median,
-        "mean_ms": statistics.fmean(samples),
-        "p90_ms": p90,
-        "min_ms": samples[0],
+        "mean_ms": float(arr.mean()),
+        "p90_ms": float(np.percentile(arr, 90)),
+        "min_ms": float(arr.min()),
+        # Sustained single-stream throughput from the median per-item latency.
         "throughput": 1000.0 / median if median > 0 else float("inf"),
     }
 
 
+def _l2(v: np.ndarray) -> np.ndarray:
+    n = np.linalg.norm(v)
+    return v / n if n > 0 else v
+
+
 # --------------------------------------------------------------------------- #
-# mlx_clip backend (production path)
+# Backends — each exposes encode_image(bytes)->vec and encode_text(str)->vec,
+# both L2-normalized, and a close() to free memory.
 # --------------------------------------------------------------------------- #
-def bench_mlxclip(model_name: str, image_bytes: bytes, query: str, warmup: int, iters: int) -> dict:
-    """Benchmark the production src.models.clip MLXClip (mlx_clip backend)."""
-    import mlx.core as mx
+class MlxBackends:
+    """mlx_clip (production) and direct_mlx, sharing ONE loaded MLX model."""
 
-    from src.models.clip import get_clip_model
-    from src.models.immich_preprocess import clean_text
+    def __init__(self, model_name: str):
+        import mlx.core as mx
 
-    model = get_clip_model(model_name)
-    if getattr(model, "_use_mlx_embeddings", False) or getattr(model, "_use_fallback", False):
-        raise SystemExit(f"{model_name!r} did not load via the mlx_clip backend (got the native SigLIP2 or open_clip path). clip_benchmark.py covers the mlx_clip OpenAI CLIP path only.")
+        from src.models.clip import get_clip_model
+        from src.models.immich_preprocess import clean_text, siglip_image_pixels
 
-    out: dict[str, dict] = {}
+        self._mx = mx
+        self._clean_text = clean_text
+        self._siglip_image_pixels = siglip_image_pixels
+        self._prod = get_clip_model(model_name)
+        if getattr(self._prod, "_use_mlx_embeddings", False) or getattr(self._prod, "_use_fallback", False):
+            raise SystemExit(f"{model_name!r} did not load via the mlx_clip backend (got the native SigLIP2 or open_clip path). clip_benchmark.py covers the mlx_clip OpenAI CLIP ports only.")
+        self._clip = self._prod._model  # the underlying mlx_clip object
 
-    # End-to-end (the public serving API): decode + preprocess + Metal forward + L2.
-    out["image_e2e"] = _bench(lambda: model.encode_image(image_bytes), warmup, iters)
-    out["text_e2e"] = _bench(lambda: model.encode_text(query), warmup, iters)
+    # -- mlx_clip: the exact production encode path (incl. metal-lock) ---------
+    def prod_image(self, image_bytes: bytes) -> np.ndarray:
+        return self._prod.encode_image(image_bytes)
 
-    # Forward-only: factor out CPU preprocessing/tokenisation so the Metal
-    # forward is isolated. Touches the mlx_clip object directly (dev tool); guard
-    # so a layout change degrades to end-to-end-only rather than failing the run.
-    try:
-        m = model._model  # the mlx_clip instance (see MLXClip.encode_image)
+    def prod_text(self, text: str) -> np.ndarray:
+        return self._prod.encode_text(text)
+
+    # -- direct_mlx: Immich preprocess -> raw mlx module, no wrapper/lock -------
+    def direct_image(self, image_bytes: bytes) -> np.ndarray:
+        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        px = self._siglip_image_pixels(image, size=CLIP_IMAGE_SIZE, mean=CLIP_MEAN, std=CLIP_STD)
+        # mlx_clip's conv is NHWC; siglip_image_pixels emits NCHW [1,3,H,W].
+        px_nhwc = np.transpose(px, (0, 2, 3, 1))
+        out = self._clip.model(pixel_values=self._mx.array(px_nhwc))
+        # np.array(...) forces the lazy MLX graph to evaluate — the timed work.
+        emb = np.array(out.image_embeds[0])
+        return _l2(emb).astype(np.float32)
+
+    def direct_text(self, text: str) -> np.ndarray:
+        ids = self._clip.tokenizer([self._clean_text(text, canonicalize=False)])
+        out = self._clip.model(input_ids=ids)
+        emb = np.array(out.text_embeds[0])
+        return _l2(emb).astype(np.float32)
+
+    # -- forward-only: time JUST the Metal module forward, inputs prepared once --
+    # mlx_clip and direct_mlx share this exact module forward (they differ only in
+    # preprocessing), so one "mlx module" forward number covers both — the gap to
+    # each one's end-to-end is that path's preprocessing/wrapper cost.
+    def prep_image_fwd(self, image_bytes: bytes):
         pil = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        pixel_values = m.img_processor([pil])
-        input_ids = m.tokenizer([clean_text(query, canonicalize=False)])
+        return self._clip.img_processor([pil])  # NHWC mlx array
 
-        def _img_fwd():
-            emb = m.model(pixel_values=pixel_values).image_embeds
-            mx.eval(emb)
+    def fwd_image(self, pixel_values) -> None:
+        self._mx.eval(self._clip.model(pixel_values=pixel_values).image_embeds)
 
-        def _txt_fwd():
-            emb = m.model(input_ids=input_ids).text_embeds
-            mx.eval(emb)
+    def prep_text_fwd(self, text: str):
+        return self._clip.tokenizer([self._clean_text(text, canonicalize=False)])
 
-        out["image_fwd"] = _bench(_img_fwd, warmup, iters)
-        out["text_fwd"] = _bench(_txt_fwd, warmup, iters)
-    except Exception as e:
-        print(f"  [mlx forward-only skipped: {e}]")
+    def fwd_text(self, input_ids) -> None:
+        self._mx.eval(self._clip.model(input_ids=input_ids).text_embeds)
 
-    model.unload()
-    gc.collect()
-    return out
-
-
-# --------------------------------------------------------------------------- #
-# Upstream ONNX backend (the standard Immich ML server's export)
-# --------------------------------------------------------------------------- #
-def bench_onnx(
-    model_name: str,
-    image_bytes: bytes,
-    query: str,
-    providers: list[str],
-    warmup: int,
-    iters: int,
-) -> dict:
-    """Benchmark the upstream immich-app ONNX export under each provider.
-
-    Downloads ``visual/model.onnx`` + ``textual/model.onnx`` (cached after the
-    first run). Preprocessing mirrors Immich's own (resize-shortest-224 +
-    center-crop + CLIP-normalize for images; open_clip BPE tokeniser -> 77 for
-    text), so the end-to-end numbers are comparable to mlx_clip's.
-    """
-    import onnxruntime as ort
-    import open_clip
-    from huggingface_hub import hf_hub_download
-
-    from src.models.immich_preprocess import clean_text, siglip_image_pixels
-
-    repo = f"immich-app/{model_name}"
-    print(f"  [onnx] fetching {repo} (visual/textual model.onnx; cached after first run)...")
-    visual_path = hf_hub_download(repo, "visual/model.onnx")
-    textual_path = hf_hub_download(repo, "textual/model.onnx")
-
-    arch, _ = _reference_arch(model_name)
-    tokenizer = open_clip.get_tokenizer(arch)
-
-    pil = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    pixel_values = siglip_image_pixels(pil, size=CLIP_IMAGE_SIZE, mean=CLIP_MEAN, std=CLIP_STD).astype(np.float32)
-    tokens = tokenizer([clean_text(query, canonicalize=False)]).cpu().numpy()
-
-    results: dict[str, dict] = {}
-    for provider in providers:
-        try:
-            so = ort.SessionOptions()
-            vsess = ort.InferenceSession(visual_path, sess_options=so, providers=[provider])
-            tsess = ort.InferenceSession(textual_path, sess_options=so, providers=[provider])
-        except Exception as e:
-            print(f"  [onnx provider {provider} unavailable: {e}]")
-            continue
-
-        actual = vsess.get_providers()[0]  # onnxruntime falls back silently; report what ran
-        results[actual] = _bench_onnx_session(vsess, tsess, image_bytes, query, pixel_values, tokens, tokenizer, warmup, iters)
-        del vsess, tsess
+    def close(self):
+        self._prod.unload()
+        self._clip = None
         gc.collect()
 
-    return results
+
+class OnnxBackend:
+    """Upstream ONNX export under one onnxruntime execution provider."""
+
+    def __init__(self, model_name: str, provider: str):
+        import onnxruntime as ort
+        from huggingface_hub import hf_hub_download
+
+        repo, arch = ONNX_REPO[model_name]
+        from src.models.immich_preprocess import siglip_image_pixels
+
+        self._siglip_image_pixels = siglip_image_pixels
+
+        vis = hf_hub_download(repo, "visual/model.onnx")
+        txt = hf_hub_download(repo, "textual/model.onnx")
+        so = ort.SessionOptions()
+        so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        self._vis = ort.InferenceSession(vis, so, providers=[provider])
+        self._txt = ort.InferenceSession(txt, so, providers=[provider])
+        # Confirm the requested provider actually loaded (CoreML can silently
+        # fall back to CPU, which would mislabel the row).
+        self.active_provider = self._vis.get_providers()[0]
+        self._vis_in = self._vis.get_inputs()[0].name
+        self._txt_in = self._txt.get_inputs()[0].name
+
+        import open_clip
+
+        self._tokenizer = open_clip.get_tokenizer(arch)
+
+    def encode_image(self, image_bytes: bytes) -> np.ndarray:
+        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        px = self._siglip_image_pixels(image, size=CLIP_IMAGE_SIZE, mean=CLIP_MEAN, std=CLIP_STD)
+        emb = self._vis.run(None, {self._vis_in: px.astype(np.float32)})[0][0]
+        return _l2(emb).astype(np.float32)
+
+    def encode_text(self, text: str) -> np.ndarray:
+        ids = self._tokenizer([text]).numpy().astype(np.int32)  # [1,77]
+        emb = self._txt.run(None, {self._txt_in: ids})[0][0]
+        return _l2(emb).astype(np.float32)
+
+    # -- forward-only: time JUST the ORT session run, inputs prepared once -------
+    def prep_image_fwd(self, image_bytes: bytes) -> np.ndarray:
+        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        return self._siglip_image_pixels(image, size=CLIP_IMAGE_SIZE, mean=CLIP_MEAN, std=CLIP_STD).astype(np.float32)
+
+    def fwd_image(self, px: np.ndarray) -> None:
+        self._vis.run(None, {self._vis_in: px})
+
+    def prep_text_fwd(self, text: str) -> np.ndarray:
+        return self._tokenizer([text]).numpy().astype(np.int32)
+
+    def fwd_text(self, ids: np.ndarray) -> None:
+        self._txt.run(None, {self._txt_in: ids})
+
+    def close(self):
+        self._vis = None
+        self._txt = None
+        gc.collect()
 
 
-def _bench_onnx_session(
-    vsess,
-    tsess,
-    image_bytes: bytes,
-    query: str,
-    pixel_values: np.ndarray,
-    tokens: np.ndarray,
-    tokenizer,
+# --------------------------------------------------------------------------- #
+# Per-model benchmark
+# --------------------------------------------------------------------------- #
+def benchmark_model(
+    model_name: str,
+    images: list[tuple[str, bytes]],
+    queries: list[str],
     warmup: int,
-    iters: int,
+    repeats: int,
+    providers: list[str],
+    emit,
 ) -> dict:
-    """Time forward-only and end-to-end image/text encodes for one ONNX session
-    pair. A function (not an inline loop body) so the closures bind real
-    parameters, not loop variables.
-    """
-    from src.models.immich_preprocess import clean_text, siglip_image_pixels
+    img_bytes = [b for _, b in images]
+    rows: dict[str, dict] = {}
+    sanity: dict[str, float] = {}
 
-    # Match each session's expected input name + integer dtype for the text ids.
-    v_in = vsess.get_inputs()[0].name
-    t_in = tsess.get_inputs()[0].name
-    t_dtype = np.int64 if "int64" in tsess.get_inputs()[0].type else np.int32
-    tok_in = tokens.astype(t_dtype)
+    # --- MLX backends (one shared load) -------------------------------------
+    emit(f"\n[backend] mlx_clip + direct_mlx (shared MLX load) for {model_name} ...")
+    mlx = MlxBackends(model_name)
+    ref_img = mlx.prod_image(img_bytes[0])
+    # Pre-prepare inputs once so the forward-only pass times the Metal module
+    # alone (no decode/preprocess); the gap to end-to-end is preprocessing cost.
+    mlx_img_pv = [mlx.prep_image_fwd(b) for b in img_bytes]
+    mlx_txt_ids = [mlx.prep_text_fwd(q) for q in queries]
+    rows["mlx_clip"] = {
+        "image": _time_calls(mlx.prod_image, img_bytes, warmup, repeats),
+        "text": _time_calls(mlx.prod_text, queries, warmup, repeats),
+        # Forward-only on the shared MLX module (covers direct_mlx too).
+        "image_fwd": _time_calls(mlx.fwd_image, mlx_img_pv, warmup, repeats),
+        "text_fwd": _time_calls(mlx.fwd_text, mlx_txt_ids, warmup, repeats),
+    }
+    # direct_mlx should match mlx_clip's embedding (same weights) — sanity it.
+    sanity["direct_mlx"] = cosine(ref_img, mlx.direct_image(img_bytes[0]))
+    rows["direct_mlx"] = {
+        "image": _time_calls(mlx.direct_image, img_bytes, warmup, repeats),
+        "text": _time_calls(mlx.direct_text, queries, warmup, repeats),
+    }
+    mlx.close()
 
-    out: dict[str, dict] = {}
-    out["image_fwd"] = _bench(lambda: vsess.run(None, {v_in: pixel_values}), warmup, iters)
-    out["text_fwd"] = _bench(lambda: tsess.run(None, {t_in: tok_in}), warmup, iters)
+    # --- ONNX backends (one session per provider) ---------------------------
+    for provider in providers:
+        label = "onnx_cpu" if provider == "CPUExecutionProvider" else "onnx_coreml"
+        emit(f"[backend] {label} ({provider}) for {model_name} ...")
+        try:
+            onnx = OnnxBackend(model_name, provider)
+        except Exception as e:
+            emit(f"  SKIP {label}: failed to init ({e})")
+            continue
+        if onnx.active_provider != provider:
+            emit(f"  NOTE {label}: requested {provider} but session reports {onnx.active_provider} (silent fallback)")
+        # Sanity: upstream ONNX vs mlx_clip should be the same embedding (parity).
+        sanity[label] = cosine(ref_img, onnx.encode_image(img_bytes[0]))
+        onnx_img_px = [onnx.prep_image_fwd(b) for b in img_bytes]
+        onnx_txt_ids = [onnx.prep_text_fwd(q) for q in queries]
+        rows[label] = {
+            "image": _time_calls(onnx.encode_image, img_bytes, warmup, repeats),
+            "text": _time_calls(onnx.encode_text, queries, warmup, repeats),
+            "image_fwd": _time_calls(onnx.fwd_image, onnx_img_px, warmup, repeats),
+            "text_fwd": _time_calls(onnx.fwd_text, onnx_txt_ids, warmup, repeats),
+        }
+        onnx.close()
 
-    # End-to-end: include decode + preprocess (image) / tokenise (text), as
-    # Immich's server does, so it lines up with mlx_clip's end-to-end.
-    def _img_e2e():
-        p = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        px = siglip_image_pixels(p, size=CLIP_IMAGE_SIZE, mean=CLIP_MEAN, std=CLIP_STD).astype(np.float32)
-        vsess.run(None, {v_in: px})
-
-    def _txt_e2e():
-        tk = tokenizer([clean_text(query, canonicalize=False)]).cpu().numpy().astype(t_dtype)
-        tsess.run(None, {t_in: tk})
-
-    out["image_e2e"] = _bench(_img_e2e, warmup, iters)
-    out["text_e2e"] = _bench(_txt_e2e, warmup, iters)
-    return out
+    return {"rows": rows, "sanity": sanity}
 
 
-# --------------------------------------------------------------------------- #
-# Reporting
-# --------------------------------------------------------------------------- #
+def _fmt_table(model_name: str, result: dict, emit) -> None:
+    rows = result["rows"]
+    sanity = result["sanity"]
+    emit(f"\n### {model_name}")
+    emit("")
+    emit("End-to-end (decode/preprocess + forward + L2 — the serving cost):")
+    emit("| backend | image med (ms) | image p90 | image img/s | text med (ms) | text p90 | text txt/s |")
+    emit("|---|--:|--:|--:|--:|--:|--:|")
+    for name, r in rows.items():
+        im, tx = r["image"], r["text"]
+        emit(f"| {name} | {im['median_ms']:.1f} | {im['p90_ms']:.1f} | {im['throughput']:.1f} | {tx['median_ms']:.2f} | {tx['p90_ms']:.2f} | {tx['throughput']:.1f} |")
+
+    # Forward-only isolates the Metal/ORT compute from CPU preprocessing — the
+    # gap to end-to-end is preprocessing/tokenization cost. The MLX module row is
+    # shared by mlx_clip and direct_mlx (same module, different preprocessing).
+    emit("")
+    emit("Forward-only (compute alone, inputs prepared once) and preprocessing overhead:")
+    emit("| compute path | image fwd (ms) | image e2e | image preprocess | text fwd (ms) | text e2e | text preprocess |")
+    emit("|---|--:|--:|--:|--:|--:|--:|")
+    for name, r in rows.items():
+        if "image_fwd" not in r:
+            continue
+        imf, txf = r["image_fwd"], r["text_fwd"]
+        im, tx = r["image"], r["text"]
+        path = "mlx module (mlx_clip/direct_mlx)" if name == "mlx_clip" else name
+        emit(
+            f"| {path} | {imf['median_ms']:.1f} | {im['median_ms']:.1f} | {im['median_ms'] - imf['median_ms']:.1f} "
+            f"| {txf['median_ms']:.2f} | {tx['median_ms']:.2f} | {tx['median_ms'] - txf['median_ms']:.2f} |"
+        )
+
+    # mlx_clip speed relative to each backend (image path) — >1 means mlx_clip
+    # is FASTER (lower latency) than that backend.
+    if "mlx_clip" in rows:
+        mc_img = rows["mlx_clip"]["image"]["median_ms"]
+        mc_txt = rows["mlx_clip"]["text"]["median_ms"]
+        emit("")
+        emit("mlx_clip end-to-end latency vs each backend (>1.0 = mlx_clip faster):")
+        for name, r in rows.items():
+            if name == "mlx_clip":
+                continue
+            emit(f"  vs {name}: image {r['image']['median_ms'] / mc_img:.2f}x  text {r['text']['median_ms'] / mc_txt:.2f}x")
+
+    emit("")
+    emit("sanity cosine vs mlx_clip (image, item 0; confirms same model is wired up):")
+    emit("  ~1.0 = identical weights (direct_mlx); ~0.97 onnx = the upstream ONNX")
+    emit("  export's own drift from the open_clip/MLX reference, not a timing issue.")
+    for name, c in sanity.items():
+        # A genuinely broken path (wrong layout/checkpoint) collapses toward 0;
+        # ~0.97 is the known ONNX-export drift, so only flag a real mismatch.
+        flag = "" if c >= 0.90 else "  <-- BROKEN: wrong preprocessing/checkpoint, timing meaningless"
+        emit(f"  {name}: {c:.4f}{flag}")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--models", nargs="+", default=DEFAULT_MODELS, help="Immich CLIP model names (mlx_clip OpenAI ports)")
-    ap.add_argument("--image", type=Path, default=None, help="a single real image to encode (else download one sample)")
-    ap.add_argument("--query", default=DEFAULT_QUERY, help="text query to encode")
-    ap.add_argument("--warmup", type=int, default=5, help="untimed warm-up iterations")
-    ap.add_argument("--iters", type=int, default=30, help="timed iterations per path")
+    ap.add_argument("--models", nargs="+", default=DEFAULT_MODELS, choices=list(ONNX_REPO), help="models to benchmark")
+    ap.add_argument("--images", type=Path, default=None, help="dir of real images (else download samples)")
+    ap.add_argument("--num-images", type=int, default=8)
+    ap.add_argument("--num-queries", type=int, default=8, help="cap on text queries timed")
+    ap.add_argument("--warmup", type=int, default=3, help="warmup passes over the item set per backend")
+    ap.add_argument("--repeats", type=int, default=8, help="timed passes over the item set per backend")
     ap.add_argument(
         "--providers",
         nargs="+",
         default=["CPUExecutionProvider", "CoreMLExecutionProvider"],
-        help="onnxruntime execution providers for the upstream baseline",
+        help="onnxruntime execution providers for the ONNX baseline",
     )
-    ap.add_argument("--no-onnx", action="store_true", help="skip the ONNX baseline (no Hub download)")
     ap.add_argument("--report", type=Path, default=None, help="write a markdown report here")
     ap.add_argument("--cache-dir", type=Path, default=ML_ROOT / "cache" / "parity_images")
+    ap.add_argument("--allow-synthetic", action="store_true", help="fall back to synthetic images if download fails")
     args = ap.parse_args()
 
-    # One sample image, shared across all models/backends.
-    if args.image:
-        image_bytes = args.image.read_bytes()
-        img_label = str(args.image)
-    else:
-        images, _ = load_images(None, 1, args.cache_dir, allow_synthetic=True)
-        image_bytes = images[0][1]
-        img_label = f"sample:{images[0][0]}"
+    images, used_synthetic = load_images(args.images, args.num_images, args.cache_dir, allow_synthetic=args.allow_synthetic)
+    queries = DEFAULT_QUERIES[: args.num_queries]
+
+    import onnxruntime as ort
+
+    avail = ort.get_available_providers()
+    providers = [p for p in args.providers if p in avail]
+    missing = [p for p in args.providers if p not in avail]
 
     lines: list[str] = []
 
@@ -286,51 +417,26 @@ def main() -> int:
         lines.append(s)
 
     emit("=" * 78)
-    emit("CLIP THROUGHPUT/LATENCY: mlx_clip (Metal) vs upstream ONNX")
+    emit("CLIP THROUGHPUT/LATENCY BENCHMARK: mlx_clip vs upstream ONNX")
     emit("=" * 78)
-    emit(f"image={img_label}  query={args.query!r}  warmup={args.warmup}  iters={args.iters}")
-    emit("Warm single-item encode (the production serving pattern). Lower ms / higher items/s is better.")
+    emit(f"Models: {args.models}")
+    emit(f"Items: {len(images)} images x {len(queries)} queries  |  warmup={args.warmup} repeats={args.repeats} (batch=1)")
+    emit(f"ONNX providers: {providers}" + (f"  (UNAVAILABLE, skipped: {missing})" if missing else ""))
+    if used_synthetic:
+        emit("NOTE: synthetic images (download failed) — latency is still valid; preprocessing on flat images is representative enough for timing.")
 
+    results: dict[str, dict] = {}
     for model_name in args.models:
-        emit()
-        emit("#" * 78)
-        emit(f"# {model_name}")
-        emit("#" * 78)
+        emit("\n" + "-" * 78)
+        emit(f"MODEL: {model_name}")
+        emit("-" * 78)
+        results[model_name] = benchmark_model(model_name, images, queries, args.warmup, args.repeats, providers, emit)
 
-        emit("\n[backend] mlx_clip (production src.models.clip, Metal GPU) ...")
-        mlx = bench_mlxclip(model_name, image_bytes, args.query, args.warmup, args.iters)
-
-        onnx: dict = {}
-        if not args.no_onnx:
-            emit(f"\n[backend] upstream ONNX immich-app/{model_name} (providers={args.providers}) ...")
-            onnx = bench_onnx(model_name, image_bytes, args.query, args.providers, args.warmup, args.iters)
-
-        # Table: one row per backend/path, columns = image vs text.
-        emit()
-        header = f"{'backend':<34} {'IMG median ms':>14} {'IMG it/s':>10} {'TXT median ms':>14} {'TXT it/s':>10}"
-        emit(header)
-        emit("-" * len(header))
-
-        def row(label: str, b: dict) -> None:
-            img = b.get("image_e2e") or b.get("image_fwd")
-            txt = b.get("text_e2e") or b.get("text_fwd")
-            emit(f"{label:<34} {img['median_ms']:>14.2f} {img['throughput']:>10.1f} {txt['median_ms']:>14.2f} {txt['throughput']:>10.1f}")
-
-        row("mlx_clip (end-to-end)", {"image_e2e": mlx["image_e2e"], "text_e2e": mlx["text_e2e"]})
-        if "image_fwd" in mlx:
-            row("mlx_clip (forward-only)", {"image_e2e": mlx["image_fwd"], "text_e2e": mlx["text_fwd"]})
-        for provider, ob in onnx.items():
-            row(f"onnx {provider} (end-to-end)", {"image_e2e": ob["image_e2e"], "text_e2e": ob["text_e2e"]})
-            row(f"onnx {provider} (forward-only)", {"image_e2e": ob["image_fwd"], "text_e2e": ob["text_fwd"]})
-
-        # Verdict vs the CPU provider (Immich's actual Docker baseline on this hardware).
-        cpu = onnx.get("CPUExecutionProvider")
-        if cpu:
-            emit()
-            for path, key in (("image", "image_e2e"), ("text", "text_e2e")):
-                speedup = cpu[key]["median_ms"] / mlx[key]["median_ms"]
-                verdict = f"mlx_clip {speedup:.2f}x FASTER than ONNX-CPU" if speedup >= 1 else f"mlx_clip {1 / speedup:.2f}x SLOWER than ONNX-CPU"
-                emit(f"  {path}: {verdict} (mlx {mlx[key]['median_ms']:.2f}ms vs onnx-cpu {cpu[key]['median_ms']:.2f}ms)")
+    emit("\n" + "=" * 78)
+    emit("SUMMARY")
+    emit("=" * 78)
+    for model_name in args.models:
+        _fmt_table(model_name, results[model_name], emit=emit)
 
     if args.report:
         args.report.write_text("\n".join(lines) + "\n")
