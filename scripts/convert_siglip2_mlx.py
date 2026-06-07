@@ -44,7 +44,7 @@ from src.models.clip import (  # noqa: E402
 )
 
 DEFAULT_HF_REPO = MLX_EMBEDDINGS_MAP["ViT-SO400M-16-SigLIP2-384__webli"]
-_PATCH_TOKEN = re.compile(r"patch\d+-\d+")
+_PATCH_TOKEN = re.compile(r"patch\d+-\d+(?:-|$)")
 
 
 def _require_patch_token(value: str, flag: str) -> None:
