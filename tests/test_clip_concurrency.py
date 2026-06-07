@@ -211,12 +211,19 @@ class _FakeSiglip2Model:
 
 
 def _bare_siglip2(model, processor):
-    """Build a SigLIP2-backed MLXClip without loading real weights."""
+    """Build a SigLIP2-backed MLXClip without loading real weights.
+
+    Post-ml-ycd.4 the SigLIP2 encode paths preprocess via
+    src.models.immich_preprocess (siglip_image_pixels + a SiglipTextTokenizer),
+    NOT the SiglipProcessor — so the image path needs no processor and the text
+    path uses a callable tokenizer returning (1, ctx) int32 ids.
+    """
     clip = object.__new__(MLXClip)
     clip.model_name = "ViT-SO400M-16-SigLIP2-384__webli"
     clip._model = model
     clip._processor = processor
     clip._tokenizer = None
+    clip._siglip_tokenizer = lambda text: np.zeros((1, 64), dtype=np.int32)
     clip._loaded = True
     clip._inference_lock = threading.Lock()
     clip._use_mlx_embeddings = True
@@ -237,11 +244,27 @@ def test_encode_text_siglip2_unloaded_midflight_no_attributeerror():
         clip.encode_text("a photo of a cat")
 
 
-def test_encode_image_siglip2_concurrent_unload_raises_clean_error():
-    """Model unloaded while preprocessing is in flight -> clean RuntimeError."""
+def test_encode_image_siglip2_concurrent_unload_raises_clean_error(monkeypatch):
+    """Model unloaded while preprocessing is in flight -> clean RuntimeError.
+
+    Image preprocessing (siglip_image_pixels) runs outside the lock and is
+    model-independent; block inside it so the model can be unloaded before the
+    encode loop captures self._model. The swap-to-None must surface as a clean
+    RuntimeError, never an AttributeError.
+    """
+    import src.models.clip as clip_module
+
     started = threading.Event()
     proceed = threading.Event()
-    clip = _bare_siglip2(_FakeSiglip2Model(), _FakeSiglip2Processor(started, proceed))
+    real_pixels = clip_module.siglip_image_pixels
+
+    def blocking_pixels(image):
+        started.set()
+        proceed.wait(5)
+        return real_pixels(image)
+
+    monkeypatch.setattr(clip_module, "siglip_image_pixels", blocking_pixels)
+    clip = _bare_siglip2(_FakeSiglip2Model(), _FakeSiglip2Processor())
 
     result = {}
 

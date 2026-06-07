@@ -86,12 +86,19 @@ class _FakeSiglip2Model:
 
 
 def _bare_siglip2(model, processor=None):
-    """Build a SigLIP2-backed MLXClip without loading real weights."""
+    """Build a SigLIP2-backed MLXClip without loading real weights.
+
+    Post-ml-ycd.4 the SigLIP2 encode paths preprocess via
+    src.models.immich_preprocess (siglip_image_pixels + a SiglipTextTokenizer)
+    rather than the SiglipProcessor, so inject a callable tokenizer returning
+    (1, ctx) int32 ids; the image path needs no processor.
+    """
     clip = object.__new__(MLXClip)
     clip.model_name = SIGLIP2_NAME
     clip._model = model
     clip._processor = processor or _FakeSiglip2Processor()
     clip._tokenizer = None
+    clip._siglip_tokenizer = lambda text: np.zeros((1, 64), dtype=np.int32)
     clip._loaded = True
     clip._inference_lock = threading.Lock()
     clip._use_mlx_embeddings = True
