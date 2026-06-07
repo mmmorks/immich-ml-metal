@@ -8,7 +8,7 @@ A Metal/ANE-optimized drop-in replacement for [Immich's](https://immich.app/) ma
 
 Immich's standard ML container runs well on NVIDIA, Intel, and AMD GPUs. Recently, the community has had trouble running it natively on Apple's ML framework (particularly after OCR was implemented). This project is a drop-in replacement for Immich-ML that uses the same ML API but uses as many native Apple ML frameworks as possible:
 
-- **CLIP Embeddings**: MLX-accelerated for image/text search — a native MLX SigLIP2 backend for Immich's default `ViT-SO400M-16-SigLIP2-384__webli`, plus mlx-clip for the OpenAI/LAION CLIP models
+- **CLIP Embeddings**: MLX-accelerated for image/text search — a native MLX SigLIP2 backend for Immich's default `ViT-SO400M-16-SigLIP2-384__webli`, plus a vendored OpenAI-CLIP backend for the `*__openai` models
 - **Face Detection**: Apple Vision framework (runs on Neural Engine)
 - **Face Recognition**: InsightFace ArcFace with CoreML acceleration
 - **OCR**: Apple Vision framework text recognition
@@ -19,7 +19,7 @@ Apple Silicon has three independent compute units — GPU (Metal), Neural Engine
 
 | Task | Compute Unit | Framework |
 |------|-------------|-----------|
-| CLIP embedding | GPU (Metal) | MLX / mlx-embeddings (SigLIP2) + mlx-clip |
+| CLIP embedding | GPU (Metal) | MLX / mlx-embeddings (SigLIP2) + vendored OpenAI-CLIP |
 | Face detection | ANE | Apple Vision |
 | Face embedding | CPU / CoreML | InsightFace ONNX |
 | OCR | ANE | Apple Vision |
@@ -44,11 +44,12 @@ INFO:   ocr: 47ms
 INFO: predict: 3 task(s) [clip+facial-recognition+ocr] completed in 135ms
 ```
 
-### CLIP backend: mlx_clip vs upstream ONNX
+### CLIP backend: vendored MLX vs upstream ONNX
 
 The OpenAI CLIP ports (`ViT-B-16__openai`, `ViT-L-14__openai`) run on MLX/Metal
-via mlx-clip. To confirm that path is at least as fast as what stock Immich
-ships — not just numerically faithful — `scripts/clip_benchmark.py` times the
+via the vendored OpenAI-CLIP backend (`src/models/clip_mlx.py`). To confirm that
+path is at least as fast as what stock Immich ships — not just numerically
+faithful — `scripts/clip_benchmark.py` times the
 warm, batch-1 encode against the same upstream `immich-app/<model>` ONNX export
 under both onnxruntime providers available on Apple Silicon (CPU, which is what
 Docker Immich actually serves here since there's no CUDA; and CoreML). Warm
@@ -56,22 +57,22 @@ median latency, single-stream throughput in parentheses (M5 Pro, 24 GB):
 
 | Model | Path | Image | Text |
 |-------|------|------:|-----:|
-| ViT-B-16 | **mlx_clip (Metal)** | **10.0 ms** (100/s) | **2.3 ms** (439/s) |
+| ViT-B-16 | **vendored (Metal)** | **10.0 ms** (100/s) | **2.3 ms** (439/s) |
 | ViT-B-16 | upstream ONNX, CPU | 27.9 ms (36/s) | 8.0 ms (126/s) |
 | ViT-B-16 | upstream ONNX, CoreML | 39.4 ms (25/s) | 23.0 ms (44/s) |
-| ViT-L-14 | **mlx_clip (Metal)** | **32.0 ms** (31/s) | **3.6 ms** (279/s) |
+| ViT-L-14 | **vendored (Metal)** | **32.0 ms** (31/s) | **3.6 ms** (279/s) |
 | ViT-L-14 | upstream ONNX, CPU | 147.0 ms (7/s) | 15.2 ms (66/s) |
 | ViT-L-14 | upstream ONNX, CoreML | 216.9 ms (5/s) | 62.6 ms (16/s) |
 
-mlx_clip is **2.8–6.8× faster on images and 3.5–17× faster on text** than the
+The vendored MLX backend is **2.8–6.8× faster on images and 3.5–17× faster on text** than the
 upstream ONNX baseline, and the gap widens with model size. (CoreML is *slower*
 than plain CPU for these CLIP graphs — onnxruntime offloads only part of the
 graph and pays for the partition.) Forward-only timing (compute alone, inputs
 prepared once) tracks end-to-end within a couple ms, so preprocessing is not the
 differentiator — the Metal forward itself is faster. A leaner hand-rolled MLX
 path that reuses `immich_preprocess` and drives the raw module directly
-(`direct_mlx` in the benchmark) lands within ~3% of mlx_clip, so the wrapper adds
-no meaningful overhead and there's no performance case for a different CLIP
+(`direct_mlx` in the benchmark) lands within ~3% of the production wrapper, so it
+adds no meaningful overhead and there's no performance case for a different CLIP
 backend. Reproduce with `.venv/bin/python scripts/clip_benchmark.py` (needs
 `pip install open-clip-torch` for the ONNX text tokenizer; the upstream ONNX
 exports download once, ~0.6 GB B-16 / ~1.7 GB L-14).
@@ -80,7 +81,7 @@ exports download once, ~0.6 GB B-16 / ~1.7 GB L-14).
 
 ** A(I)lpha Quality - Use at Your Own Risk**
 
-- [x] CLIP implementation (native MLX SigLIP2 backend + mlx-clip)
+- [x] CLIP implementation (native MLX SigLIP2 backend + vendored OpenAI-CLIP)
 - [x] Face detection (Vision framework)
 - [x] Face embeddings (InsightFace + CoreML)
 - [x] OCR (Vision framework)
@@ -107,11 +108,6 @@ exports download once, ~0.6 GB B-16 / ~1.7 GB L-14).
 # Clone the repository
 git clone https://github.com/sebastianfredette/immich-ml-metal.git
 cd immich-ml-metal
-
-# Pin mlx-clip to a specific commit (for stability)
-# Get the current commit hash:
-git ls-remote https://github.com/harperreed/mlx_clip.git HEAD
-# Edit requirements.txt and replace the tail end of the mlx_clip.git address with the new hash
 
 # Create and activate virtual environment
 # Please ensure python 3.11 is used — 3.13 doesn't yet have all required wheels
@@ -157,76 +153,84 @@ Configure via environment variables or edit `src/config.py`:
   - This is Immich's current default smart-search model. See
     [Native SigLIP2 backend](#native-siglip2-backend) below.
 
-- OpenAI CLIP models -> MLX (via [mlx_clip](https://github.com/harperreed/mlx_clip)),
-  converting the **original OpenAI checkpoint** on first use. mlx_clip's hardcoded
-  `quick_gelu` matches OpenAI CLIP and its resize-shortest + center-crop image
-  processor matches the Immich index, so these are parity-faithful (see
-  [CLIP parity](#clip-parity-mlx_clip-path)).
+- OpenAI CLIP models -> MLX (via the **vendored CLIP backend**, `src/models/clip_mlx.py`),
+  converting the **original OpenAI checkpoint** on first use and running it with
+  **standard `gelu`** to match Immich's ONNX export (NOT the checkpoint's native
+  `quick_gelu` — see [CLIP parity](#clip-parity-vendored-openai-clip-path)). Its
+  resize-shortest + center-crop image processor matches the Immich index, so these
+  are verified parity-faithful.
   - `ViT-B-32__openai` -> `openai/clip-vit-base-patch32`
   - `ViT-B-16__openai`-> `openai/clip-vit-base-patch16`
   - `ViT-L-14__openai`-> `openai/clip-vit-large-patch14`
 
-- LAION CLIP models -> **unsupported** (no parity-faithful backend; raises a clear error)
+- LAION CLIP models -> **unsupported** (not yet wired; raises a clear error)
   - `ViT-B-32__laion2b-s34b-b79k`
   - `ViT-B-32__laion2b_s34b_b79k`
-  - LAION trained with **standard** `gelu`, but `mlx_clip` hardcodes `quick_gelu`, so
-    it cannot reproduce LAION embeddings even from the correct checkpoint. open_clip
-    (their only faithful backend) was removed (see
-    [No open_clip fallback](#no-open_clip-fallback)).
+  - LAION trained with **standard** `gelu`, which the vendored backend can now run
+    (its activation is configurable), but LAION parity has not been verified/wired,
+    so it raises rather than serving unverified vectors.
 
 - Other SigLIP models -> **unsupported** (no MLX backend; raises a clear error)
   - `ViT-B-16-SigLIP__webli`
   - `ViT-B-16-SigLIP2__webli`
 
-- Unknown/unmapped model name: served by the default `openai/clip-vit-base-patch32`
+- Unknown/unmapped model name: **raises** a clear error (the `default` mapping is
+  reachable only via an explicit `default` request, for internal/test use)
 
 The LAION and ViT-B-16 SigLIP variants have no parity-faithful MLX backend, so
 requesting one raises a clear error rather than silently serving non-parity
-embeddings (see [Parity-or-fail](#parity-or-fail)). **Before this was fixed,
-every mlx_clip model except `ViT-B-32__openai` silently loaded OpenAI
-B-32 weights**: the repo id was passed as `mlx_clip`'s local `model_dir` instead of
-its `hf_repo`, so an absent dir fell back to `mlx_clip`'s default (OpenAI B-32)
-checkpoint regardless of the requested name.
+embeddings (see [Parity-or-fail](#parity-or-fail)). **An earlier wrong-weights bug
+made every OpenAI port except `ViT-B-32__openai` silently load OpenAI B-32 weights**:
+the third-party loader took its first arg as a local `model_dir`, and passing the
+repo id there (instead of as `hf_repo`) made an absent dir fall back to that loader's
+default (OpenAI B-32) regardless of the requested name. The vendored backend takes
+`hf_repo` explicitly, and `_assert_mlx_clip_checkpoint` verifies the loaded vision
+tower's arch at load time so this can't silently recur.
 
-#### CLIP parity (mlx_clip path)
+#### CLIP parity (vendored OpenAI-CLIP path)
 
-Unlike SigLIP2, the OpenAI/LAION CLIP models run through mlx_clip's own image
-processor and BPE tokenizer rather than the Immich-faithful `immich_preprocess`
-path, so their index-compatibility is checked by a dedicated gate,
-`scripts/clip_parity.py` — the production mlx_clip path vs the same open_clip
-checkpoint (the one Immich exports to ONNX) run through Immich's *exact* transform.
+Unlike SigLIP2, the OpenAI CLIP models run through a vendored CLIP backend
+(`src/models/clip_mlx.py`) with its own image processor and BPE tokenizer rather
+than the Immich-faithful `immich_preprocess` path, so their index-compatibility
+is checked by a dedicated gate, `scripts/clip_parity.py` — the production backend
+vs the same open_clip checkpoint Immich exports to ONNX, run through Immich's
+*exact* transform.
 
 All three OpenAI ports are **verified drop-ins, no re-index** — image **and** text
 cosine `1.0000` (12 photos × 12 queries), top-1 retrieval agreement `1.000`, vs the
-Immich-transform reference (and, for B-32, open_clip's own transform too):
+Immich-transform reference:
 
 - **`ViT-B-32__openai`** — `1.0000` / `1.0000`.
-- **`ViT-B-16__openai`** — `1.0000` / `1.0000` (after the wrong-weights fix).
-- **`ViT-L-14__openai`** — `1.0000` / `1.0000` (after the wrong-weights fix).
+- **`ViT-B-16__openai`** — `1.0000` / `1.0000`.
+- **`ViT-L-14__openai`** — `1.0000` / `1.0000`.
 
-The mlx_clip path applies `clean_text(canonicalize=False)` then mlx_clip's CLIP BPE
-tokenizer (whitespace-only canonicalization — OpenAI BPE is case/punctuation-bearing,
-unlike SigLIP), and resize-shortest-224 + center-crop + CLIP-normalize for images —
-reproducing the standard Immich server. mlx_clip's hardcoded `quick_gelu` is the
-correct OpenAI activation, so its embeddings are bit-faithful to the upstream
-quickgelu checkpoint.
+**Activation — the subtle part.** OpenAI CLIP's *native* activation is `quick_gelu`,
+but Immich's shipped ONNX export for these ports runs **standard `gelu`**. (Verified:
+the `immich-app/<model>` ONNX export matches a standard-gelu open_clip checkpoint to
+cosine `1.0000` on identical pixels/tokens, and a quick_gelu reference at only
+~`0.96–0.97` — the gap scales with depth: L-14 > B-16.) Since the goal is parity with
+the *index Immich actually built*, the vendored backend deliberately runs **standard
+gelu**, not the checkpoint's native quick_gelu — and the gate's open_clip reference
+uses the plain (standard-gelu) arch to match. A `quick_gelu` backend (what the
+previous third-party `mlx_clip` package hardcoded) drifts ~`0.97` from a stock-Immich
+OpenAI-CLIP index — a query/index mismatch the *old* gate missed because it compared
+against a quick_gelu reference. The vendored backend made the activation configurable;
+`src/models/clip.py` forces `gelu` for these ports.
 
-Until that fix, B-16/L-14 silently served the **default** `openai/clip-vit-base-patch32`
-weights (`MLXClip._load_model` passed the repo id as mlx_clip's `model_dir`, not its
-`hf_repo`), measuring ~0 cosine; passing the correct `hf_repo` fixed it. **LAION is
-unsupported** — it needs standard GELU but mlx_clip hardcodes `quick_gelu`, so it
-cannot be reproduced and `_load_model` raises (the open_clip fallback that once
-served it was removed). The gate's open_clip reference uses the `-quickgelu`
-arch for every OpenAI port; a plain (standard-gelu) reference false-FAILs a correct
-mlx_clip at ~0.985 (the quickgelu-vs-gelu gap). Re-check any model with
+Text uses `clean_text(canonicalize=False)` then the CLIP BPE tokenizer (OpenAI BPE is
+case/punctuation-bearing, unlike SigLIP); images use resize-shortest-224 + center-crop
++ CLIP-normalize — reproducing the standard Immich server. **LAION** is currently
+**unsupported** (`_load_model` raises): the vendored backend *can* now run its standard
+gelu, but LAION parity is not yet verified/wired. Re-check any model with
 `.venv/bin/python scripts/clip_parity.py --model <name>`.
 
-#### CLIP speed (mlx_clip path)
+#### CLIP speed (vendored OpenAI-CLIP path)
 
-Parity proves mlx_clip is *correct*; `scripts/clip_benchmark.py` proves it is
-also *faster* than the upstream ONNX path it replaced — mlx_clip (Metal) beats
-the upstream ONNX-CPU baseline (what Immich's Docker image runs on Apple Silicon)
-by 2.8–6.8× on images and 3.5–17× on text for the OpenAI ports. Numbers and
+Parity proves the vendored backend is *correct*; `scripts/clip_benchmark.py`
+proves it is also *faster* than the upstream ONNX path it replaced — the vendored
+MLX path (Metal) beats the upstream ONNX-CPU baseline (what Immich's Docker image
+runs on Apple Silicon) by 2.8–6.8× on images and 3.5–17× on text for the OpenAI
+ports. Numbers and
 methodology are in [Performance: Why This is Fast](#performance-why-this-is-fast).
 
 ### Native SigLIP2 backend
@@ -344,12 +348,13 @@ So:
   transform; see [Native SigLIP2 backend](#native-siglip2-backend)). A load
   failure **raises** rather than falling back, so a partial cache / version drift
   can't poison the index; `/health` then reports degraded.
-- OpenAI CLIP models are served by `mlx-clip`, converting the original OpenAI
-  checkpoint (its `quick_gelu` + center-crop preprocessing are parity-faithful).
-- A model with no parity-faithful backend — the LAION ports (`mlx-clip` hardcodes
-  `quick_gelu`, but LAION needs standard `gelu`) and the `ViT-B-16-SigLIP*`
-  variants — **raises a clear "no parity-faithful MLX backend" error** instead of
-  silently serving non-parity vectors.
+- OpenAI CLIP models are served by the vendored CLIP backend (`src/models/clip_mlx.py`),
+  converting the original OpenAI checkpoint and running it with **standard `gelu`** +
+  center-crop preprocessing to match Immich's ONNX export (parity-faithful).
+- A model with no parity-faithful backend yet — the LAION ports (runnable in
+  principle but not verified/wired) and the `ViT-B-16-SigLIP*` variants —
+  **raises a clear "no parity-faithful MLX backend" error** instead of silently
+  serving non-parity vectors.
 
 `scripts/embedding_parity.py` has an optional `openclip` diagnostic backend (a
 regression witness for the squash-vs-crop divergence); `pip install open-clip-torch`

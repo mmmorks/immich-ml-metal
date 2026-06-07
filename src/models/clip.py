@@ -20,9 +20,18 @@ import mlx.core as mx
 import numpy as np
 from PIL import Image
 
+from src.models.clip_mlx import VendoredMlxClip
 from src.models.immich_preprocess import clean_text, siglip_image_pixels
 
 logger = logging.getLogger(__name__)
+
+# Activation for the vendored OpenAI-CLIP backend. Immich's shipped OpenAI-CLIP
+# ONNX exports (the artifact a stock smart-search index was built with) run
+# STANDARD gelu — NOT the checkpoint's native quick_gelu. Loading these weights
+# with quick_gelu drifts ~0.97 cosine from that index (both towers, worse with
+# depth); standard gelu matches it to 1.0000. We match Immich's export, not the
+# source checkpoint. See scripts/clip_parity.py and the README "CLIP parity" notes.
+_OPENAI_CLIP_ACTIVATION = "gelu"
 
 
 def _l2_normalize(embedding: np.ndarray) -> np.ndarray:
@@ -36,31 +45,30 @@ def _l2_normalize(embedding: np.ndarray) -> np.ndarray:
     return embedding / norm if norm > 0 else embedding
 
 
-# Model name mapping: Immich name -> the HF repo mlx_clip converts FROM
-# (or None = no parity-faithful MLX backend; _load_model raises for those).
+# Model name mapping: Immich name -> the HF repo the vendored backend converts
+# FROM (or None = no parity-faithful MLX backend; _load_model raises for those).
 #
-# The value is passed to mlx_clip() as ``hf_repo``, NOT as the local model_dir.
-# mlx_clip's first positional arg is a LOCAL dir: if absent it converts its
-# ``hf_repo`` (default openai/clip-vit-base-patch32) into it. The prior code
-# passed the value POSITIONALLY as model_dir with no hf_repo, so every model
-# whose local dir didn't exist silently converted the DEFAULT OpenAI B-32
-# weights regardless of the requested name — ViT-B-32__openai was
-# correct only by coincidence (its target == the default). We now pass the
-# correct hf_repo so the RIGHT checkpoint is converted (see _load_model).
+# The value is passed to VendoredMlxClip() as ``hf_repo``, NOT as the local
+# model_dir. The loader's first positional arg is a LOCAL cache dir: if absent it
+# converts ``hf_repo`` into it; afterwards it loads the converted weights. (The
+# original third-party package defaulted hf_repo to openai/clip-vit-base-patch32,
+# so passing the repo id positionally as model_dir once silently converted the
+# DEFAULT B-32 for every model — guarded now by _assert_mlx_clip_checkpoint.)
 MODEL_MAP = {
-    # OpenAI CLIP models -> mlx_clip, converting the CORRECT OpenAI checkpoint.
-    # mlx_clip hardcodes quick_gelu (model.py), which matches OpenAI CLIP, and
-    # its CLIPImageProcessor (resize-shortest + center-crop) matches the Immich
-    # index — so these are parity-faithful. The architecture (patch size, depth,
-    # width) is read from each repo's config.json, so B-16/L-14 load correctly.
+    # OpenAI CLIP models -> vendored backend, converting the CORRECT OpenAI
+    # checkpoint and running it with STANDARD gelu (hidden_act override) to match
+    # Immich's ONNX export — see _OPENAI_CLIP_ACTIVATION. Its CLIPImageProcessor
+    # (resize-shortest + center-crop) matches the Immich index too, so these are
+    # verified parity-faithful (clip_parity.py: cosine 1.0000 vs the index). The
+    # arch (patch size, depth, width) is read from each repo's config.json.
     "ViT-B-32__openai": "openai/clip-vit-base-patch32",
     "ViT-B-16__openai": "openai/clip-vit-base-patch16",
     "ViT-L-14__openai": "openai/clip-vit-large-patch14",
-    # LAION CLIP models -> None (no parity-faithful backend). mlx_clip hardcodes
-    # quick_gelu, but LAION trained with STANDARD gelu, so mlx_clip cannot
-    # reproduce LAION embeddings even from the correct checkpoint; open_clip (the
-    # only faithful backend) was removed. A request raises in
-    # _load_model rather than silently serving non-parity vectors.
+    # LAION CLIP models -> None (not yet wired). LAION trained with STANDARD gelu,
+    # which the vendored backend CAN now run (the activation is configurable, the
+    # reason this was previously deemed impossible). But LAION parity has not been
+    # verified or wired up, so these still raise rather than serve unverified
+    # vectors. Enabling them is tracked as follow-up work.
     "ViT-B-32__laion2b-s34b-b79k": None,
     "ViT-B-32__laion2b_s34b_b79k": None,
     # SigLIP / SigLIP2 models. The SO400M SigLIP2 default is handled natively via
@@ -70,7 +78,7 @@ MODEL_MAP = {
     "ViT-B-16-SigLIP__webli": None,
     "ViT-B-16-SigLIP2__webli": None,
     "ViT-SO400M-16-SigLIP2-384__webli": None,
-    # Default fallback (the OpenAI B-32 checkpoint mlx_clip also defaults to).
+    # Default fallback (OpenAI B-32, reachable only via an explicit 'default' request).
     "default": "openai/clip-vit-base-patch32",
 }
 
@@ -363,18 +371,17 @@ class MLXClip:
         if self.model_name in MODEL_MAP:
             self._repo_id = MODEL_MAP[self.model_name]
             if self._repo_id is None:
-                # An explicitly-listed model with no parity-faithful backend:
-                # the SigLIP v1/v2 ViT-B-16 variants (open_clip's squash
-                # preprocessing diverged from the index) and the LAION ports
-                # (mlx_clip's hardcoded quick_gelu can't reproduce LAION's
-                # standard gelu). open_clip — their only faithful backend — was
-                # removed, so fail clearly rather than silently
-                # substituting the wrong (default) model.
+                # An explicitly-listed model with no parity-faithful backend: the
+                # SigLIP v1/v2 ViT-B-16 variants (open_clip's squash preprocessing
+                # diverged from the index) and the LAION ports (vendored backend
+                # could run their standard gelu, but LAION parity is not yet
+                # verified/wired). Fail clearly rather than silently substituting
+                # the wrong (default) model.
                 raise RuntimeError(
-                    f"CLIP model '{self.model_name}' has no parity-faithful MLX backend. The "
+                    f"CLIP model '{self.model_name}' has no parity-faithful MLX backend yet. The "
                     f"open_clip fallback was removed because its SigLIP preprocessing "
-                    f"diverges from the Immich index, and mlx_clip's hardcoded quick_gelu cannot "
-                    f"reproduce LAION weights; only models with a native MLX or mlx_clip port are "
+                    f"diverges from the Immich index, and the LAION ports are not yet wired/"
+                    f"verified; only models with a native MLX or vendored CLIP port are "
                     f"served. Supported: {_supported_model_names()}."
                 )
         else:
@@ -385,63 +392,60 @@ class MLXClip:
             # branch instead. MODEL_MAP['default'] stays reachable only via an explicit
             # 'default' request (internal/test use), never from an unmapped Immich request.
             raise RuntimeError(
-                f"Unknown CLIP model '{self.model_name}': no MLX backend is mapped for it; only models with a native MLX or mlx_clip port are served. Supported: {_supported_model_names()}."
+                f"Unknown CLIP model '{self.model_name}': no MLX backend is mapped for it; only models with a native MLX or vendored CLIP port are served. Supported: {_supported_model_names()}."
             )
 
-        from mlx_clip import mlx_clip
-
-        # mlx_clip(model_dir, hf_repo): pass the LOCAL cache dir as model_dir and
-        # the CORRECT checkpoint as hf_repo. On first use the dir is absent so
-        # mlx_clip converts hf_repo into it; afterwards it loads the converted
-        # weights. Passing self._repo_id positionally (the prior bug) made it the
-        # model_dir, so an absent dir silently converted the DEFAULT OpenAI B-32
-        # for every model.
+        # VendoredMlxClip(model_dir, hf_repo, hidden_act): pass the LOCAL cache dir
+        # as model_dir and the CORRECT checkpoint as hf_repo. On first use the dir
+        # is absent so the loader converts hf_repo into it; afterwards it loads the
+        # converted weights. hidden_act forces STANDARD gelu so embeddings match
+        # Immich's ONNX export rather than the checkpoint's native quick_gelu (see
+        # _OPENAI_CLIP_ACTIVATION).
         cache_dir = mlx_clip_cache_dir(self._repo_id)
-        logger.info(f"Loading MLX CLIP model: {self.model_name} -> hf_repo={self._repo_id}, cache={cache_dir}")
-        self._model = mlx_clip(str(cache_dir), hf_repo=self._repo_id)
+        logger.info(f"Loading MLX CLIP model: {self.model_name} -> hf_repo={self._repo_id}, cache={cache_dir}, act={_OPENAI_CLIP_ACTIVATION}")
+        self._model = VendoredMlxClip(str(cache_dir), hf_repo=self._repo_id, hidden_act=_OPENAI_CLIP_ACTIVATION)
         self._assert_mlx_clip_checkpoint(cache_dir)
         self._loaded = True
         logger.info(f"Successfully loaded CLIP model via MLX: {self.model_name}")
 
     def _assert_mlx_clip_checkpoint(self, cache_dir: Path):
-        """Fail loud if mlx_clip loaded a checkpoint other than the one requested.
+        """Fail loud if the vendored backend loaded a checkpoint other than the one requested.
 
-        Defends against the silent-wrong-weights footgun resurfacing. mlx_clip is a small
-        third-party port (harperreed) whose ctor converts its DEFAULT checkpoint
-        (openai/clip-vit-base-patch32) when the cache dir is absent — regardless
-        of hf_repo. We pass hf_repo correctly today, but a version bump (or a
-        stale/mixed cache dir) could still leave the loaded model out of sync
-        with the request, and that previously went unsignalled until search
-        quality dropped. scripts/clip_parity.py catches it end-to-end, but only
-        when run by hand; this makes the protection automatic at load.
+        Defends against the silent-wrong-weights footgun. The vendored loader
+        loads whatever ``*.safetensors`` live in the cache dir; a stale/mixed/
+        partial convert (or a dir converted for a different model but named for
+        this one) could leave the loaded model out of sync with the request, and
+        that previously went unsignalled until search quality dropped.
+        scripts/clip_parity.py catches it end-to-end, but only when run by hand;
+        this makes the protection automatic at load.
 
         Compares the loaded vision tower against the arch the repo id encodes
-        (patch size + base/large width), reading mlx_clip's ACTUAL layout —
+        (patch size + base/large width), reading the model's ACTUAL layout —
         ``model.vision_model.embeddings.config`` (a CLIPVisionConfig with
-        patch_size/hidden_size). NOTE mlx_clip's CLIPModel has no ``.config``
-        attribute, so that path must come off the vision embeddings, not the
-        model. If the structure can't be introspected (a future mlx_clip
-        restructure), warns rather than breaking an otherwise-working load — the
-        guard itself then needs maintenance.
+        patch_size/hidden_size). NOTE CLIPModel has no ``.config`` attribute, so
+        that path must come off the vision embeddings, not the model. If the
+        structure can't be introspected (a future restructure of clip_mlx.py),
+        warns rather than breaking an otherwise-working load — the guard itself
+        then needs maintenance.
         """
         repo = self._repo_id
         if not repo:
-            return  # only the mlx_clip (non-None hf_repo) path reaches here
+            return  # only the vendored (non-None hf_repo) path reaches here
         expected = _expected_vision_arch(repo)
         if not expected:
             return  # repo id doesn't encode an arch to verify against
-        # mlx_clip layout: wrapper.model (CLIPModel) -> vision_model -> embeddings
+        # Vendored layout: wrapper.model (CLIPModel) -> vision_model -> embeddings
         # -> config (CLIPVisionConfig). CLIPModel itself has NO .config, so the
         # vision config must be reached via the embeddings. Any missing link
-        # (a future mlx_clip restructure) collapses to None -> warn-and-skip below.
+        # (a future clip_mlx restructure) collapses to None -> warn-and-skip below.
         model = getattr(self._model, "model", None)
         embeddings = getattr(getattr(model, "vision_model", None), "embeddings", None)
         vision = getattr(embeddings, "config", None)
         if vision is None:
             logger.warning(
-                "mlx_clip load-time guard could not introspect the vision config for "
+                "Vendored CLIP load-time guard could not introspect the vision config for "
                 f"{self.model_name} ({self._repo_id}); skipping checkpoint verification. "
-                "mlx_clip's model structure may have changed — review _assert_mlx_clip_checkpoint."
+                "The model structure in clip_mlx.py may have changed — review _assert_mlx_clip_checkpoint."
             )
             return
         for attr, want in expected.items():

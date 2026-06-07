@@ -100,15 +100,20 @@ DEFAULT_MODEL = "ViT-B-32__openai"
 # resolve_fallback_arch that was removed, so the gate keeps a self-contained
 # reference (its open_clip use is dev-only, not a production dependency).
 _OPENCLIP_REF = {
-    # OpenAI checkpoints REQUIRE the quickgelu variant — OpenAI CLIP trained with
-    # quick_gelu, and mlx_clip hardcodes it too. Loading the plain (standard-gelu)
-    # arch builds a wrong-activation reference: open_clip even warns "QuickGELU
-    # mismatch", and the gate then false-FAILs a correct mlx_clip at ~0.985 (the
-    # quickgelu-vs-gelu gap) instead of ~1.0. All three OpenAI ports
-    # must carry -quickgelu, not just B-32.
-    "ViT-B-32__openai": ("ViT-B-32-quickgelu", "openai"),
-    "ViT-B-16__openai": ("ViT-B-16-quickgelu", "openai"),
-    "ViT-L-14__openai": ("ViT-L-14-quickgelu", "openai"),
+    # OpenAI ports use the PLAIN (standard-gelu) arch as the reference — NOT
+    # -quickgelu. The gate's job is index-compatibility with the standard Immich
+    # server, which runs the immich-app ONNX export, and that export uses standard
+    # gelu (verified: ONNX vs plain-gelu open_clip == cosine 1.0000 on identical
+    # Immich-transform inputs, both towers, B-32/B-16/L-14). OpenAI CLIP's NATIVE
+    # activation is quick_gelu, but Immich's export does not use it, so the
+    # production backend (src/models/clip_mlx.py) deliberately runs standard gelu
+    # to match the index — and the reference must too. A -quickgelu reference would
+    # measure faithfulness to the original checkpoint, not parity with the shipped
+    # index, and false-PASS a quick_gelu backend that is actually ~0.97 off the
+    # real index.
+    "ViT-B-32__openai": ("ViT-B-32", "openai"),
+    "ViT-B-16__openai": ("ViT-B-16", "openai"),
+    "ViT-L-14__openai": ("ViT-L-14", "openai"),
     "ViT-B-32__laion2b-s34b-b79k": ("ViT-B-32", "laion2b_s34b_b79k"),
     "ViT-B-32__laion2b_s34b_b79k": ("ViT-B-32", "laion2b_s34b_b79k"),
 }
@@ -117,16 +122,15 @@ _OPENCLIP_REF = {
 def _reference_arch(model_name: str) -> tuple[str, str]:
     """open_clip ``(arch, pretrained)`` reference for ``model_name``.
 
-    Curated map first, then an ``arch__pretrained`` split with the OpenAI
-    quickgelu suffix rule (OpenAI weights need the quickgelu variant) — the same
-    resolution the removed production fallback used.
+    Curated map first, then a plain ``arch__pretrained`` split. The reference uses
+    the standard-gelu arch (no -quickgelu suffix): Immich's OpenAI-CLIP ONNX export
+    runs standard gelu, so that is the activation the index — and the production
+    backend — use (see ``_OPENCLIP_REF``).
     """
     if model_name in _OPENCLIP_REF:
         return _OPENCLIP_REF[model_name]
     if "__" in model_name:
         arch, pretrained = model_name.split("__", 1)
-        if pretrained == "openai" and "quickgelu" not in arch.lower() and "siglip" not in arch.lower():
-            arch += "-quickgelu"
         return arch, pretrained
     raise SystemExit(f"No open_clip reference known for {model_name!r}; add it to _OPENCLIP_REF.")
 

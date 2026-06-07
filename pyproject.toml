@@ -80,6 +80,13 @@ ignore = [
 # embed_openclip_refs captures `model`, which is `del`'d at the function end for
 # GPU cleanup, so ruff mis-reports it as F821. Well-defined at call time.
 "scripts/clip_parity.py" = ["F821"]
+# clip_mlx.py is a vendored port of Apple's mlx-examples CLIP (HF CLIPTokenizer /
+# CLIPImageProcessor included). These lints are inherent to that faithful copy —
+# the BPE merge loop's successive-pair zips (RUF007) and list concatenations
+# (RUF005), and the HF processor's mutable default mean/std lists (B006, never
+# mutated). Kept verbatim; the embeddings are verified to cosine 1.0000 vs the
+# Immich index by scripts/clip_parity.py.
+"src/models/clip_mlx.py" = ["B006", "RUF005", "RUF007"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["src"]

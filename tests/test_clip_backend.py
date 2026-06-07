@@ -352,21 +352,21 @@ def test_no_fallback_machinery():
 
 
 def _capture_mlx_clip(monkeypatch):
-    """Patch mlx_clip.mlx_clip and return a dict capturing its call args.
+    """Patch the vendored CLIP loader and return a dict capturing its call args.
 
-    mlx_clip(model_dir, hf_repo): we assert on hf_repo (the checkpoint actually
-    converted), since the model_dir is just a local cache path.
+    VendoredMlxClip(model_dir, hf_repo, hidden_act): we assert on hf_repo (the
+    checkpoint actually converted) and hidden_act (standard 'gelu' to match
+    Immich's ONNX export), since model_dir is just a local cache path.
     """
-    import mlx_clip as mlx_clip_module
-
     seen = {}
 
-    def fake_mlx_clip(model_dir, hf_repo=None):
+    def fake_loader(model_dir, hf_repo=None, hidden_act=None):
         seen["model_dir"] = model_dir
         seen["hf_repo"] = hf_repo
+        seen["hidden_act"] = hidden_act
         return object()
 
-    monkeypatch.setattr(mlx_clip_module, "mlx_clip", fake_mlx_clip)
+    monkeypatch.setattr(clip_module, "VendoredMlxClip", fake_loader)
     return seen
 
 
@@ -435,6 +435,21 @@ def test_openai_variants_convert_correct_weights(monkeypatch, name, expected_rep
     assert clip._loaded is True
 
 
+@pytest.mark.parametrize("name", [*WRONG_WEIGHTS_OPENAI, "ViT-B-32__openai"])
+def test_openai_ports_request_standard_gelu(monkeypatch, name):
+    """Every OpenAI port must load with standard ``gelu`` — NOT the checkpoint's
+    native ``quick_gelu``. Immich's shipped OpenAI-CLIP ONNX exports run standard
+    gelu; quick_gelu would drift ~0.97 cosine from the existing index. This is the
+    activation fix: parity is with Immich's export, not the source checkpoint."""
+    seen = _capture_mlx_clip(monkeypatch)
+
+    clip = _bare_for_load(name)
+    clip._load_model()
+
+    assert seen["hidden_act"] == "gelu", f"{name} must load with standard gelu to match Immich's ONNX export"
+    assert clip._loaded is True
+
+
 @pytest.mark.parametrize("name", LAION_NAMES)
 def test_laion_variants_fail_loud(monkeypatch, name):
     """LAION names must raise (no parity-faithful backend) rather than silently
@@ -455,12 +470,10 @@ def test_laion_variants_fail_loud(monkeypatch, name):
 # --- Load-time checkpoint guard ----------------------------------------------
 #
 # The tests above pin the hf_repo we *request*. This block guards the other
-# half: that the checkpoint mlx_clip *actually loaded* matches it. mlx_clip is a
-# small third-party port (harperreed) whose ctor footgun — an absent cache dir
-# converts the DEFAULT openai/clip-vit-base-patch32 regardless of hf_repo
-# — could be reintroduced by a version bump even though we now pass
-# hf_repo correctly. _load_model verifies the loaded vision tower against the
-# arch the repo id encodes (patch size + base/large width) and fails loud on
+# half: that the checkpoint the vendored backend *actually loaded* matches it. A
+# stale/mixed/partial convert in the cache dir could leave the loaded weights out
+# of sync with the request. _load_model verifies the loaded vision tower against
+# the arch the repo id encodes (patch size + base/large width) and fails loud on
 # mismatch so wrong weights can't silently poison the smart-search index.
 
 import types
@@ -480,17 +493,16 @@ def _fake_loaded_clip(patch_size, hidden_size=768):
 
 
 def _patch_mlx_clip_returning(monkeypatch, model):
-    """Patch mlx_clip.mlx_clip to return `model`; return a dict capturing args."""
-    import mlx_clip as mlx_clip_module
-
+    """Patch the vendored loader to return `model`; return a dict capturing args."""
     seen = {}
 
-    def fake_mlx_clip(model_dir, hf_repo=None):
+    def fake_loader(model_dir, hf_repo=None, hidden_act=None):
         seen["model_dir"] = model_dir
         seen["hf_repo"] = hf_repo
+        seen["hidden_act"] = hidden_act
         return model
 
-    monkeypatch.setattr(mlx_clip_module, "mlx_clip", fake_mlx_clip)
+    monkeypatch.setattr(clip_module, "VendoredMlxClip", fake_loader)
     return seen
 
 
@@ -563,21 +575,32 @@ def test_loaded_checkpoint_guard_skips_when_unintrospectable(monkeypatch, caplog
 
 
 def _real_mlx_clip_wrapper(patch_size, hidden_size):
-    """A wrapper whose ``.model`` is a REAL mlx_clip CLIPModel (no weights).
+    """A wrapper whose ``.model`` is a REAL vendored CLIPModel (no weights).
 
     Tiny dims keep construction fast — the guard only reads the vision config, so
     layer counts/widths beyond what it checks are irrelevant. Mirrors how _load_model
-    sees ``self._model`` (the mlx_clip wrapper) with ``.model`` the CLIPModel.
+    sees ``self._model`` (the vendored loader) with ``.model`` the CLIPModel.
     """
-    from mlx_clip.model import CLIPConfig, CLIPModel, CLIPTextConfig, CLIPVisionConfig
+    from src.models.clip_mlx import CLIPConfig, CLIPModel, CLIPTextConfig, CLIPVisionConfig
 
     tc = CLIPTextConfig(
-        num_hidden_layers=1, hidden_size=64, intermediate_size=128,
-        num_attention_heads=1, max_position_embeddings=77, vocab_size=49408, layer_norm_eps=1e-5,
+        num_hidden_layers=1,
+        hidden_size=64,
+        intermediate_size=128,
+        num_attention_heads=1,
+        max_position_embeddings=77,
+        vocab_size=49408,
+        layer_norm_eps=1e-5,
     )
     vc = CLIPVisionConfig(
-        num_hidden_layers=1, hidden_size=hidden_size, intermediate_size=128,
-        num_attention_heads=1, num_channels=3, image_size=224, patch_size=patch_size, layer_norm_eps=1e-5,
+        num_hidden_layers=1,
+        hidden_size=hidden_size,
+        intermediate_size=128,
+        num_attention_heads=1,
+        num_channels=3,
+        image_size=224,
+        patch_size=patch_size,
+        layer_norm_eps=1e-5,
     )
     real = CLIPModel(CLIPConfig(text_config=tc, vision_config=vc, projection_dim=64))
     return types.SimpleNamespace(model=real)

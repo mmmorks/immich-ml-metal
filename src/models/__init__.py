@@ -1,7 +1,7 @@
 """
 Model implementations for immich-ml-metal.
 
-- clip: CLIP image/text embeddings (native MLX SigLIP2 + mlx-clip)
+- clip: CLIP image/text embeddings (native MLX SigLIP2 + vendored OpenAI-CLIP, clip_mlx)
 - face_detect: Face detection (Apple Vision framework)
 - face_embed: Face embeddings (InsightFace ArcFace)
 - ocr: Text recognition (Apple Vision framework)
