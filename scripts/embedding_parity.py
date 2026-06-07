@@ -51,6 +51,7 @@ import argparse
 import gc
 import io
 import sys
+import time
 import urllib.request
 from pathlib import Path
 
@@ -101,11 +102,39 @@ def cosine(a: np.ndarray, b: np.ndarray) -> float:
 # --------------------------------------------------------------------------- #
 # Sample images
 # --------------------------------------------------------------------------- #
-def load_images(images_dir: Path | None, num: int, cache_dir: Path) -> list[tuple[str, bytes]]:
-    """Return [(label, jpeg_bytes)]. Use a directory if given, else download.
+def _download_one(url: str, attempts: int = 3, base_delay: float = 1.0) -> bytes:
+    """Fetch one URL, retrying transient failures. Raises the last error if all
+    ``attempts`` fail (so the caller decides between fail-fast and fallback)."""
+    last_exc: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "parity-harness"})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return resp.read()
+        except Exception as e:  # noqa: BLE001 — network is the only failure mode here
+            last_exc = e
+            if attempt < attempts:
+                delay = base_delay * attempt
+                print(f"[images] fetch failed ({e!r}); retry {attempt}/{attempts - 1} in {delay:.0f}s")
+                time.sleep(delay)
+    assert last_exc is not None
+    raise last_exc
 
-    Downloading uses picsum.photos seeded by index so the set is deterministic
-    and reproducible. Falls back to synthetic structured images if offline.
+
+def load_images(
+    images_dir: Path | None,
+    num: int,
+    cache_dir: Path,
+    allow_synthetic: bool = False,
+) -> tuple[list[tuple[str, bytes]], bool]:
+    """Return ``([(label, jpeg_bytes)], used_synthetic)``. Use a directory if
+    given, else download deterministic picsum.photos samples (seeded by index).
+
+    A failed download is retried per-image. If a sample still cannot be fetched,
+    we fail fast (``SystemExit``) rather than silently degrading the gate — unless
+    ``allow_synthetic`` is set, in which case we fall back LOUDLY and flag the run
+    via the returned ``used_synthetic`` so the caller can refuse to pass the gate
+    on synthetic data.
     """
     if images_dir is not None:
         exts = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
@@ -122,7 +151,7 @@ def load_images(images_dir: Path | None, num: int, cache_dir: Path) -> list[tupl
             img.save(buf, format="JPEG", quality=95)
             out.append((p.name, buf.getvalue()))
         print(f"[images] {len(out)} real images from {images_dir}")
-        return out
+        return out, False
 
     cache_dir.mkdir(parents=True, exist_ok=True)
     out: list[tuple[str, bytes]] = []
@@ -134,18 +163,28 @@ def load_images(images_dir: Path | None, num: int, cache_dir: Path) -> list[tupl
         if not fpath.exists():
             url = f"https://picsum.photos/seed/{seed}/640/480"
             try:
-                req = urllib.request.Request(url, headers={"User-Agent": "parity-harness"})
-                with urllib.request.urlopen(req, timeout=30) as resp:
-                    fpath.write_bytes(resp.read())
-            except Exception as e:  # offline / service down -> synthetic fallback
-                print(f"[images] download failed ({e!r}); using synthetic images")
-                return _synthetic_images(num)
+                fpath.write_bytes(_download_one(url))
+            except Exception as e:  # noqa: BLE001 — offline / service down
+                if not allow_synthetic:
+                    raise SystemExit(
+                        f"[images] sample download failed after retries ({e!r}). "
+                        "A trustworthy parity gate needs real photos — re-run with "
+                        "network access, pass --images DIR with local photos, or pass "
+                        "--allow-synthetic to force the (weaker) synthetic fallback "
+                        "(which marks the run INCONCLUSIVE)."
+                    )
+                print("!" * 78)
+                print(f"[images] sample download failed after retries ({e!r})")
+                print("[images] --allow-synthetic set: falling back to SYNTHETIC images.")
+                print("[images] Parity stats on synthetic data are NOT a valid gate.")
+                print("!" * 78)
+                return _synthetic_images(num), True
         img = Image.open(fpath).convert("RGB")
         buf = io.BytesIO()
         img.save(buf, format="JPEG", quality=95)
         out.append((f"picsum_{seed}", buf.getvalue()))
     print(f"[images] {len(out)} downloaded sample photos 640x480 (cache: {cache_dir})")
-    return out
+    return out, False
 
 
 def _synthetic_images(num: int) -> list[tuple[str, bytes]]:
@@ -346,13 +385,22 @@ def main() -> int:
     ap.add_argument("--threshold", type=float, default=0.99, help="cosine gate (applied to immich)")
     ap.add_argument("--report", type=Path, default=None, help="write a markdown report here")
     ap.add_argument("--cache-dir", type=Path, default=ML_ROOT / "cache" / "parity_images")
+    ap.add_argument(
+        "--allow-synthetic",
+        action="store_true",
+        help="if sample-image download fails, fall back to synthetic images instead "
+        "of erroring out. The run is then marked INCONCLUSIVE (non-zero exit) since "
+        "synthetic data is not a valid parity gate.",
+    )
     args = ap.parse_args()
 
     queries = DEFAULT_QUERIES
     if args.queries_file:
         queries = [ln.strip() for ln in args.queries_file.read_text().splitlines() if ln.strip()]
 
-    images = load_images(args.images, args.num_images, args.cache_dir)
+    images, used_synthetic = load_images(
+        args.images, args.num_images, args.cache_dir, allow_synthetic=args.allow_synthetic
+    )
     labels = [name for name, _ in images]
     print(f"[setup] {len(images)} images x {len(queries)} queries; references={args.ref}; device={args.device}")
 
@@ -448,6 +496,18 @@ def main() -> int:
         emit("  => Port/weights issue beyond preprocessing; investigate before deciding.")
         verdict_rc = 1
     emit("-" * 78)
+
+    if used_synthetic:
+        # Synthetic data can't validate a preserve-vs-reindex decision; never let
+        # a synthetic run report a passing gate. rc=3 distinguishes it from the
+        # other non-zero verdicts (1=FAIL, 2=immich-not-run).
+        emit()
+        emit("!" * 78)
+        emit("RUN USED SYNTHETIC IMAGES — this verdict is NOT a valid index-strategy gate.")
+        emit("Re-run with real sample photos (network access or --images DIR) before deciding.")
+        emit("!" * 78)
+        if verdict_rc == 0:
+            verdict_rc = 3
 
     if args.report:
         args.report.write_text("\n".join(lines) + "\n")
