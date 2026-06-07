@@ -349,12 +349,21 @@ def embed_onnx_siglip2(images: list[tuple[str, bytes]], queries: list[str]) -> t
     Returns (image_embeds [N,D], text_embeds [M,D]), L2-normalized float32.
     """
     import onnxruntime as ort
-    from huggingface_hub import hf_hub_download
+    from huggingface_hub import hf_hub_download, snapshot_download
 
     from src.models.immich_preprocess import SiglipTextTokenizer, siglip_image_pixels
 
-    vis_path = hf_hub_download(ONNX_REPO_SIGLIP2, "visual/model.onnx")
-    txt_path = hf_hub_download(ONNX_REPO_SIGLIP2, "textual/model.onnx")
+    # The SigLIP2 textual export stores its weights as ONNX external-data files
+    # (model.onnx is a tiny graph; the real tensors live in sibling files that
+    # must sit next to it). Fetch the whole visual+textual trees in one snapshot
+    # so onnxruntime can resolve them; skip the non-ONNX runtime variants.
+    local = snapshot_download(
+        ONNX_REPO_SIGLIP2,
+        allow_patterns=["visual/model.onnx", "textual/*"],
+        ignore_patterns=["*.rknn", "*.armnn"],
+    )
+    vis_path = f"{local}/visual/model.onnx"
+    txt_path = f"{local}/textual/model.onnx"
     so = ort.SessionOptions()
     so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
     vis = ort.InferenceSession(vis_path, so, providers=["CPUExecutionProvider"])

@@ -131,11 +131,23 @@ def gen_face() -> None:
         raise SystemExit("face: upstream pipeline detected zero faces — cannot freeze golden.")
     emb = np.stack([r["embedding"] for r in records])
     _check_finite("face", emb)
-    labels = [r["label"] for r in records]
-    img_ids = [r["img_id"] for r in records]
+
+    # Identify each face by a STABLE per-image key (identity + filename) that the
+    # test reconstructs identically from the committed fixtures via
+    # load_image_dir (whose Sample.name is "<ident>/<file>"). Positional ids are
+    # NOT stable across load_lfw vs load_image_dir ordering.
+    def _ident(label: str | None) -> str:
+        return (label or "unknown").replace(" ", "_")
+
+    img_keys = [f"{_ident(r['label'])}/{Path(r['name']).name}" for r in records]
+    labels = [_ident(r["label"]) for r in records]
     bboxes = np.array([r["bbox"] for r in records], dtype=np.float32)
+    # Integer image ids (faces grouped by source image) for same-image-excluded
+    # top-1; derived from the stable keys so the grouping is order-independent.
+    key_to_id = {k: i for i, k in enumerate(dict.fromkeys(img_keys))}
+    img_ids = [key_to_id[k] for k in img_keys]
     # Golden top-1 retrieval accuracy of the upstream embeddings against itself
-    # (same-image excluded) — the test asserts MLX is within 0.02 of this.
+    # (same-image excluded) — the test asserts MLX stays within 0.02 of this.
     golden_top1 = top1_accuracy(emb, labels, img_ids, emb, labels, img_ids)
     _write(
         "face",
@@ -143,7 +155,7 @@ def gen_face() -> None:
             "embeddings": emb,
             "bboxes": bboxes,
             "labels": np.array(labels),
-            "img_ids": np.array(img_ids),
+            "img_keys": np.array(img_keys),
             "golden_top1": np.array(golden_top1, dtype=np.float64),
         },
         {

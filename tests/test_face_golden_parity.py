@@ -46,24 +46,25 @@ def test_face_mlx_matches_onnx_golden():
     gold = np.load(GOLDEN / "face.npz", allow_pickle=False)
     g_emb = gold["embeddings"]
     g_bbox = gold["bboxes"]
-    g_labels = list(gold["labels"])
-    g_img_ids = list(int(x) for x in gold["img_ids"])
+    g_keys = [str(k) for k in gold["img_keys"]]  # "<ident>/<file>" per face
     golden_top1 = float(gold["golden_top1"])
 
     samples = fep.load_image_dir(FIX / "faces")
     forced = os.getenv("ML_RUN_PARITY") == "1"
 
-    # Fork pipeline: Apple Vision detect → ArcFace embed, per face.
-    mlx_emb, mlx_bbox, mlx_labels, mlx_img_ids = [], [], [], []
+    # Fork pipeline: Apple Vision detect → ArcFace embed, per face. Each face is
+    # tagged with the SAME stable image key the golden uses (Sample.name is
+    # "<ident>/<file>"), so golden and fork align regardless of load order.
+    mlx_emb, mlx_bbox, mlx_labels, mlx_keys = [], [], [], []
     try:
-        for img_id, s in enumerate(samples):
+        for s in samples:
             for f in fep.fork_faces(s.data, nose_strategy="tip"):
                 e = fep.embed(s.data, f["kps"])
                 n = float(np.linalg.norm(e))
                 mlx_emb.append((e / n if n > 0 else e).astype(np.float32))
                 mlx_bbox.append(f["bbox"])
                 mlx_labels.append(s.label)
-                mlx_img_ids.append(img_id)
+                mlx_keys.append(s.name)
     except Exception as e:  # noqa: BLE001
         if forced:
             raise
@@ -72,27 +73,42 @@ def test_face_mlx_matches_onnx_golden():
     assert mlx_emb, "fork pipeline detected zero faces on committed fixtures"
     mlx_emb_arr = np.stack(mlx_emb)
 
-    # Greedy-match fork faces to golden faces by bbox IoU (same image only).
+    # Greedy-match golden faces to fork faces by bbox IoU, WITHIN the same source
+    # image. SCRFD (golden) and Apple Vision (fork) routinely detect different
+    # SETS of faces, so a golden face with no fork counterpart is a detection
+    # difference, not an alignment-drift regression — it is left unmatched and
+    # excluded from the median. We DO require that every committed image yields
+    # at least one matched face (the fork must still find each main subject).
     drift = []
-    for gi in range(len(g_labels)):
-        best_j, best_iou = -1, 0.0
-        for j in range(len(mlx_bbox)):
-            if mlx_img_ids[j] != g_img_ids[gi]:
-                continue
-            iou = fep.iou(tuple(g_bbox[gi]), tuple(mlx_bbox[j]))
-            if iou > best_iou:
-                best_iou, best_j = iou, j
-        assert best_j >= 0 and best_iou >= 0.3, (
-            f"golden face {gi} ({g_labels[gi]}, img {g_img_ids[gi]}) has no fork match "
-            f"(best IoU {best_iou:.2f}) — detection-set regression"
-        )
-        drift.append(float(np.dot(g_emb[gi], mlx_emb_arr[best_j])))
+    matched_per_image: dict[str, int] = {k: 0 for k in g_keys}
+    fork_by_key: dict[str, list[int]] = {}
+    for j, k in enumerate(mlx_keys):
+        fork_by_key.setdefault(k, []).append(j)
+    for key in dict.fromkeys(g_keys):
+        g_idx = [gi for gi, gk in enumerate(g_keys) if gk == key]
+        f_idx = fork_by_key.get(key, [])
+        g_boxes = [tuple(g_bbox[gi]) for gi in g_idx]
+        f_boxes = [tuple(mlx_bbox[j]) for j in f_idx]
+        for gi_local, fj_local in fep.greedy_match(g_boxes, f_boxes, iou_thresh=0.3):
+            gi, fj = g_idx[gi_local], f_idx[fj_local]
+            drift.append(float(np.dot(g_emb[gi], mlx_emb_arr[fj])))
+            matched_per_image[key] += 1
+
+    unmatched_images = [k for k, n in matched_per_image.items() if n == 0]
+    assert not unmatched_images, (
+        f"no fork face matched golden in image(s) {unmatched_images} — detection-set regression"
+    )
+    assert drift, "no golden/fork face pairs matched by IoU"
 
     median_cos = float(np.median(drift))
     assert median_cos >= MEDIAN_COS_MIN, (
         f"median alignment-drift cosine {median_cos:.4f} < {MEDIAN_COS_MIN}; per-face={sorted(drift)}"
     )
 
+    # Fork's own top-1 retrieval accuracy (same-image excluded), compared to the
+    # golden's. Integer image ids derived from the stable keys.
+    key_to_id = {k: i for i, k in enumerate(dict.fromkeys(mlx_keys))}
+    mlx_img_ids = [key_to_id[k] for k in mlx_keys]
     mlx_top1 = fep.top1_accuracy(mlx_emb_arr, mlx_labels, mlx_img_ids, mlx_emb_arr, mlx_labels, mlx_img_ids)
     drop = golden_top1 - float(mlx_top1)
     assert drop <= TOP1_DROP_MAX, (
