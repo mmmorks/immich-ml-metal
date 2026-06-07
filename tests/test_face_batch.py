@@ -31,6 +31,20 @@ def _face_with_landmarks(landmarks, score=0.9):
     }
 
 
+# A valid-ish 5-point set (left_eye, right_eye, nose, left_mouth, right_mouth).
+# Any 5 points produce a norm_crop affine warp, so these need not be a real face.
+_LANDMARKS = [[120.0, 130.0], [180.0, 130.0], [150.0, 160.0], [125.0, 185.0], [175.0, 185.0]]
+
+
+def _landmarks_at(dx=0.0, dy=0.0):
+    """A distinct 5-point set, offset so multi-face tests have different faces."""
+    return [[x + dx, y + dy] for x, y in _LANDMARKS]
+
+
+def _aligned_face(dx=0.0, dy=0.0, score=0.9):
+    return _face_with_landmarks(_landmarks_at(dx, dy), score=score)
+
+
 @pytest.fixture
 def mock_model():
     """Mock the recognition model to return fake 512-dim embeddings."""
@@ -51,9 +65,9 @@ def test_empty_faces():
     assert get_face_embeddings_batch(_fake_img(), [], "buffalo_l") == []
 
 
-def test_single_face_bbox(mock_model):
+def test_single_face(mock_model):
     img = _fake_img()
-    faces = [_face_with_bbox(100, 100, 200, 200)]
+    faces = [_aligned_face()]
     with patch("src.models.face_embed.get_recognition_model", return_value=mock_model):
         results = get_face_embeddings_batch(img, faces)
     assert len(results) == 1
@@ -62,13 +76,9 @@ def test_single_face_bbox(mock_model):
     assert abs(np.linalg.norm(results[0]) - 1.0) < 1e-5  # normalized
 
 
-def test_multiple_faces_bbox(mock_model):
+def test_multiple_faces(mock_model):
     img = _fake_img()
-    faces = [
-        _face_with_bbox(10, 10, 100, 100),
-        _face_with_bbox(200, 50, 350, 250),
-        _face_with_bbox(400, 100, 550, 300),
-    ]
+    faces = [_aligned_face(), _aligned_face(dx=40), _aligned_face(dx=80, dy=20)]
     with patch("src.models.face_embed.get_recognition_model", return_value=mock_model):
         results = get_face_embeddings_batch(img, faces)
     assert len(results) == 3
@@ -78,10 +88,7 @@ def test_multiple_faces_bbox(mock_model):
 def test_result_order_preserved(mock_model):
     """Results must be in the same order as input faces."""
     img = _fake_img()
-    faces = [
-        _face_with_bbox(10, 10, 50, 50),
-        _face_with_bbox(200, 200, 400, 400),
-    ]
+    faces = [_aligned_face(), _aligned_face(dx=60, dy=30)]
     with patch("src.models.face_embed.get_recognition_model", return_value=mock_model):
         results = get_face_embeddings_batch(img, faces)
     assert len(results) == 2
@@ -93,10 +100,10 @@ def test_result_order_preserved(mock_model):
 # --- Edge cases ---
 
 
-def test_empty_crop_returns_none(mock_model):
-    """Face with zero-area bbox should return None, not crash."""
+def test_alignment_failure_returns_none(mock_model):
+    """A face whose landmarks can't be aligned returns None, not crash."""
     img = _fake_img()
-    faces = [_face_with_bbox(100, 100, 100, 100)]  # zero-width
+    faces = [_face_with_landmarks([[1.0, 2.0]])]  # wrong shape -> norm_crop raises
     with patch("src.models.face_embed.get_recognition_model", return_value=mock_model):
         results = get_face_embeddings_batch(img, faces)
     assert len(results) == 1
@@ -104,27 +111,27 @@ def test_empty_crop_returns_none(mock_model):
 
 
 def test_mixed_success_and_failure(mock_model):
-    """One good face, one bad — good gets embedding, bad gets None."""
+    """Good faces get embeddings; a face with bad landmarks gets None."""
     img = _fake_img()
     faces = [
-        _face_with_bbox(50, 50, 200, 200),  # valid
-        _face_with_bbox(100, 100, 100, 100),  # zero-area
-        _face_with_bbox(300, 100, 500, 300),  # valid
+        _aligned_face(),  # valid
+        _face_with_landmarks([[1.0, 2.0]]),  # malformed -> None
+        _aligned_face(dx=70),  # valid
     ]
     with patch("src.models.face_embed.get_recognition_model", return_value=mock_model):
         results = get_face_embeddings_batch(img, faces)
     assert len(results) == 3
     assert results[0] is not None  # valid
-    assert results[1] is None  # zero-area
+    assert results[1] is None  # malformed landmarks
     assert results[2] is not None  # valid
 
 
 def test_all_faces_fail():
-    """All faces fail alignment — returns list of Nones, no crash."""
+    """All faces unembeddable — returns list of Nones, no crash, no inference."""
     img = _fake_img(w=10, h=10)
     faces = [
-        _face_with_bbox(0, 0, 0, 0),
-        _face_with_bbox(5, 5, 5, 5),
+        _face_with_bbox(0, 0, 0, 0),  # no landmarks -> skipped
+        _face_with_landmarks([[1.0, 2.0]]),  # malformed -> alignment fails
     ]
     # Don't even need to mock the model — should never reach inference
     results = get_face_embeddings_batch(img, faces)
@@ -132,14 +139,49 @@ def test_all_faces_fail():
     assert all(r is None for r in results)
 
 
-def test_bbox_clamped_to_image(mock_model):
-    """Bbox extending beyond image edges should be clamped, not crash."""
-    img = _fake_img(w=200, h=200)
-    faces = [_face_with_bbox(-50, -50, 250, 250)]  # extends beyond all edges
+# --- Landmark-miss handling (ml-6o9) ---
+
+
+def test_face_without_landmarks_is_skipped(mock_model, caplog):
+    """A face lacking 'landmarks' must NOT be bbox-cropped into the
+    landmark-aligned index — it is skipped (None) and warned about."""
+    import logging
+
+    img = _fake_img()
+    faces = [_face_with_bbox(100, 100, 200, 200)]  # no landmarks
+    with caplog.at_level(logging.WARNING, logger="src.models.face_embed"), patch(
+        "src.models.face_embed.get_recognition_model", return_value=mock_model
+    ):
+        results = get_face_embeddings_batch(img, faces)
+    assert len(results) == 1
+    assert results[0] is None
+    assert any("landmark" in r.message.lower() and r.levelno == logging.WARNING for r in caplog.records)
+
+
+def test_landmark_face_still_embedded(mock_model):
+    """Faces WITH landmarks are still embedded via the aligned path."""
+    img = _fake_img()
+    faces = [_face_with_landmarks(_LANDMARKS)]
     with patch("src.models.face_embed.get_recognition_model", return_value=mock_model):
         results = get_face_embeddings_batch(img, faces)
     assert len(results) == 1
     assert results[0] is not None
+    assert results[0].shape == (512,)
+    assert abs(np.linalg.norm(results[0]) - 1.0) < 1e-5
+
+
+def test_mixed_landmark_and_landmarkless(mock_model):
+    """Landmarked face embedded; landmark-less face skipped — order preserved."""
+    img = _fake_img()
+    faces = [
+        _face_with_landmarks(_LANDMARKS),
+        _face_with_bbox(300, 100, 500, 300),  # no landmarks
+    ]
+    with patch("src.models.face_embed.get_recognition_model", return_value=mock_model):
+        results = get_face_embeddings_batch(img, faces)
+    assert len(results) == 2
+    assert results[0] is not None
+    assert results[1] is None
 
 
 # --- Embedding normalization ---
@@ -147,7 +189,7 @@ def test_bbox_clamped_to_image(mock_model):
 
 def test_embeddings_are_unit_normalized(mock_model):
     img = _fake_img()
-    faces = [_face_with_bbox(50, 50, 200, 200)]
+    faces = [_aligned_face()]
     with patch("src.models.face_embed.get_recognition_model", return_value=mock_model):
         results = get_face_embeddings_batch(img, faces)
     assert results[0] is not None

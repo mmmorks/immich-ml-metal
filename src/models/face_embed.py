@@ -288,14 +288,20 @@ def get_face_embeddings_batch(img_bgr: np.ndarray, faces: list[dict], model_name
     For N faces this turns N image-decodes + N inferences into 0 decodes + 1 inference
     (caller supplies the already-decoded BGR image).
 
+    Only faces carrying 5-point 'landmarks' are embedded — landmark alignment is
+    what makes an ArcFace embedding comparable to the rest of the index. A face
+    without landmarks is skipped (None) and warned about rather than bbox-cropped,
+    because a non-pose-normalized crop yields a drifted vector that would silently
+    degrade the shared index (ml-6o9).
+
     Args:
         img_bgr: Pre-decoded BGR image (np.ndarray from cv2.imdecode).
         faces: List of face dicts, each with 'boundingBox' and optionally 'landmarks'.
         model_name: InsightFace model to use.
 
     Returns:
-        List of 512-dim normalized embeddings (or None for faces that failed alignment),
-        in the same order as the input faces list.
+        List of 512-dim normalized embeddings, or None for faces that lacked
+        landmarks or failed alignment, in the same order as the input faces list.
     """
     if not faces:
         return []
@@ -306,29 +312,28 @@ def get_face_embeddings_batch(img_bgr: np.ndarray, faces: list[dict], model_name
         logger.error("insightface not available")
         raise RuntimeError("Install insightface: pip install insightface") from e
 
-    # --- Align every face (landmark-based preferred, bbox crop fallback) ---
+    # --- Align every face (landmark-based pose normalization only) ---
+    # A face WITHOUT 5-point landmarks is skipped, not bbox-cropped: a plain
+    # bbox crop has no pose normalization, so its ArcFace embedding lives in a
+    # different geometry than the landmark-aligned crops this index is built
+    # from. Mixing such a vector into the shared index is silent degrade-to-wrong
+    # (ml-6o9 / ml-95y c2). Better to leave the face un-embedded (visible, the
+    # caller drops it) than to poison the index. The WARNING surfaces the
+    # landmark miss that face_detect only logs at DEBUG.
     aligned: list[np.ndarray | None] = []
     for face in faces:
+        if "landmarks" not in face:
+            logger.warning(
+                "Face %s has no landmarks (Vision could not recover all 5 points); "
+                "skipping — not embedded, to avoid a non-aligned vector polluting the "
+                "landmark-aligned face index",
+                face.get("boundingBox"),
+            )
+            aligned.append(None)
+            continue
         try:
-            if "landmarks" in face:
-                kps = np.array(face["landmarks"], dtype=np.float32)
-                aligned.append(face_align.norm_crop(img_bgr, kps, image_size=ARCFACE_INPUT_SIZE))
-            else:
-                bbox = face["boundingBox"]
-                x1, y1 = int(bbox["x1"]), int(bbox["y1"])
-                x2, y2 = int(bbox["x2"]), int(bbox["y2"])
-                w, h = x2 - x1, y2 - y1
-                pad_x, pad_y = int(w * 0.1), int(h * 0.1)
-                x1 = max(0, x1 - pad_x)
-                y1 = max(0, y1 - pad_y)
-                x2 = min(img_bgr.shape[1], x2 + pad_x)
-                y2 = min(img_bgr.shape[0], y2 + pad_y)
-                crop = img_bgr[y1:y2, x1:x2]
-                if crop.size == 0:
-                    logger.warning("Empty face crop for bbox %s", bbox)
-                    aligned.append(None)
-                    continue
-                aligned.append(cv2.resize(crop, (ARCFACE_INPUT_SIZE, ARCFACE_INPUT_SIZE)))
+            kps = np.array(face["landmarks"], dtype=np.float32)
+            aligned.append(face_align.norm_crop(img_bgr, kps, image_size=ARCFACE_INPUT_SIZE))
         except Exception as e:
             logger.warning("Face alignment failed for face %s: %s", face.get("boundingBox"), e)
             aligned.append(None)
