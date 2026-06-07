@@ -298,7 +298,7 @@ def test_mlx_embeddings_map_repos_have_patch_token():
 # A model is served only by a backend whose preprocessing matches Immich's. A
 # native SigLIP2 load failure propagates (nothing serves index-incompatible
 # squash embeddings), an unsupported model raises a clear error, and an unknown
-# name resolves to the mlx_clip default.
+# name raises rather than degrading to the mlx_clip default (ml-bu1).
 
 UNSUPPORTED_NAME = "ViT-B-16-SigLIP2__webli"  # mapped to None in MODEL_MAP
 
@@ -350,8 +350,35 @@ def test_no_fallback_machinery():
         assert not hasattr(clip_module, name), f"{name} must not exist"
 
 
-def test_unknown_model_falls_back_to_mlx_default(monkeypatch):
-    """An unmapped name resolves to the mlx_clip default (ViT-B-32)."""
+def test_unknown_model_raises_clear_error(monkeypatch):
+    """An unmapped name must raise a clear 'no MLX backend' error (ml-bu1), not
+    silently degrade to the mlx_clip default (ViT-B-32) — a wrong, index-incompatible
+    vector. Parity with the None-backend branch."""
+    import mlx_clip as mlx_clip_module
+
+    # If the fix regressed and the unmapped name fell through to the mlx_clip load,
+    # this would record the repo and the raise assertion below would fail.
+    seen = {}
+
+    def fake_mlx_clip(repo_id):
+        seen["repo_id"] = repo_id
+        return object()
+
+    monkeypatch.setattr(mlx_clip_module, "mlx_clip", fake_mlx_clip)
+
+    unknown = "Totally-Unknown-Model"
+    clip = _bare_for_load(unknown)
+    with pytest.raises(RuntimeError) as ei:
+        clip._load_model()
+    msg = str(ei.value)
+    assert unknown in msg, "error must name the unknown model"
+    assert "no MLX backend" in msg
+    assert "seen" not in seen and not seen, "must not have attempted the default mlx_clip load"
+
+
+def test_explicit_default_still_loads(monkeypatch):
+    """MODEL_MAP['default'] stays reachable for internal/test use via an explicit
+    'default' request — only *unmapped* names raise (ml-bu1)."""
     import mlx_clip as mlx_clip_module
 
     seen = {}
@@ -360,11 +387,9 @@ def test_unknown_model_falls_back_to_mlx_default(monkeypatch):
         seen["repo_id"] = repo_id
         return object()
 
-    # _load_model does a local `from mlx_clip import mlx_clip`, which re-reads the
-    # attribute at call time, so patching the module attribute is picked up.
     monkeypatch.setattr(mlx_clip_module, "mlx_clip", fake_mlx_clip)
 
-    clip = _bare_for_load("Totally-Unknown-Model")
+    clip = _bare_for_load("default")
     clip._load_model()
 
     assert seen["repo_id"] == clip_module.MODEL_MAP["default"]

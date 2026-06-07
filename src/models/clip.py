@@ -323,8 +323,16 @@ class MLXClip:
                     f"native MLX or mlx_clip port are served. Supported: {_supported_model_names()}."
                 )
         else:
-            logger.warning(f"Unknown CLIP model '{self.model_name}', using MLX default (ViT-B-32)")
-            self._repo_id = MODEL_MAP["default"]
+            # An unmapped model name. This used to silently load MODEL_MAP['default']
+            # (ViT-B-32) — a wrong, index-incompatible vector signalled only by a log
+            # line (ml-bu1 / ml-95y finding c1: degrade-to-wrong, invisible until search
+            # quality drops). Fail loudly with the same clear error as the None-backend
+            # branch instead. MODEL_MAP['default'] stays reachable only via an explicit
+            # 'default' request (internal/test use), never from an unmapped Immich request.
+            raise RuntimeError(
+                f"Unknown CLIP model '{self.model_name}': no MLX backend is mapped for it; only "
+                f"models with a native MLX or mlx_clip port are served. Supported: {_supported_model_names()}."
+            )
 
         from mlx_clip import mlx_clip
 
