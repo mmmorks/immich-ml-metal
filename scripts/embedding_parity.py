@@ -224,18 +224,16 @@ def embed_openclip(images: list[tuple[str, bytes]], queries: list[str], device: 
     NOT the index gate — the NAS does its own preprocessing at inference (see the
     ``immich`` reference). open_clip is only the source exported to ONNX.
 
-    open-clip-torch was dropped from requirements.txt in ml-b82 (the production
-    fallback was removed); this diagnostic backend is optional, so guide the user
-    to install it rather than crashing with a bare ImportError.
+    open-clip-torch is optional (not in requirements.txt), so guide the user to
+    install it rather than crashing with a bare ImportError.
     """
     try:
         import open_clip
         import torch
     except ImportError as e:
         raise SystemExit(
-            "The 'openclip' diagnostic needs open-clip-torch, which is no longer a "
-            "requirement (ml-b82). Install it to use this reference: "
-            "pip install open-clip-torch"
+            "The 'openclip' diagnostic needs open-clip-torch (optional). "
+            "Install it to use this reference: pip install open-clip-torch"
         ) from e
 
     model, _, preprocess = open_clip.create_model_and_transforms(OPENCLIP_ARCH, pretrained=OPENCLIP_PRETRAINED)

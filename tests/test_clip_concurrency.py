@@ -117,8 +117,8 @@ def test_encode_text_unloaded_midflight_no_attributeerror():
 # get_*_features() output MUST be materialized (np.array) *inside* the inference
 # lock — otherwise un-evaluated Metal buffers can collide with a concurrent
 # Vision (face/OCR) call and crash the process. They also cover the same
-# swap-to-None race as the mlx_clip/fallback paths above. No torch, no real
-# weights, no PyObjC needed.
+# swap-to-None race as the mlx_clip path above. No torch, no real weights,
+# no PyObjC needed.
 
 
 class _FakeSiglip2Processor:

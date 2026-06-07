@@ -29,14 +29,10 @@ mlx-clip @ git+https://github.com/harperreed/mlx_clip.git@f56e3ecc72c74c68b6b50e
 # Pulls in mlx-vlm + transformers.
 mlx-embeddings==0.1.0
 
-# NOTE: the open_clip/MPS fallback was removed in ml-b82. open_clip's bundled
-# SigLIP transform squashes (resize-to-square) instead of Immich's resize-
-# shortest+center-crop, so it produced index-incompatible embeddings (~0.83
-# cosine) — the one path that broke parity with the upstream Immich ML server.
-# Models are served only by the native MLX SigLIP2 backend above or mlx-clip;
-# any other model raises in clip.py:_load_model. (torch is still pulled in by
-# mlx-clip.) The scripts/embedding_parity.py 'openclip' diagnostic optionally
-# wants open-clip-torch; install it manually if you need that reference.
+# CLIP models are served only by the native MLX SigLIP2 backend above or
+# mlx-clip; any other model raises in clip.py:_load_model. (torch is pulled in by
+# mlx-clip.) scripts/embedding_parity.py has an optional 'openclip' diagnostic
+# backend — `pip install open-clip-torch` manually if you want to run it.
 
 # Face recognition - official onnxruntime supports Apple Silicon via CoreML
 # onnxruntime 1.18+ supports numpy 2.x

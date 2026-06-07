@@ -187,13 +187,12 @@ def test_mlx_embeddings_map_repos_have_patch_token():
         assert pat.search(repo), f"{name} -> {repo!r} lacks a patchNN-NNN token"
 
 
-# --- No open_clip fallback: parity-first load contract (ml-b82) --------------
+# --- Parity-or-fail load contract (no fallback backend) ----------------------
 #
-# The open_clip fallback was removed because its SigLIP *squash* preprocessing
-# (~0.83 cosine vs the Immich index) is the only path that violates parity. So a
-# native SigLIP2 load failure must propagate (nothing left to poison the index),
-# an explicitly-unsupported model must raise a clear error, and an unknown name
-# still resolves to the mlx_clip default (that path is unchanged).
+# A model is served only by a backend whose preprocessing matches Immich's. A
+# native SigLIP2 load failure propagates (nothing serves index-incompatible
+# squash embeddings), an unsupported model raises a clear error, and an unknown
+# name resolves to the mlx_clip default.
 
 UNSUPPORTED_NAME = "ViT-B-16-SigLIP2__webli"  # mapped to None in MODEL_MAP
 
@@ -206,8 +205,8 @@ def _bare_for_load(name=SIGLIP2_NAME):
 
 
 def test_native_siglip2_load_failure_propagates(monkeypatch):
-    """A native backend load failure raises — there is no open_clip fallback to
-    silently serve index-incompatible squash embeddings."""
+    """A native backend load failure raises — no fallback silently serves
+    index-incompatible embeddings."""
 
     def boom(self):
         raise RuntimeError("native backend exploded")
@@ -220,35 +219,33 @@ def test_native_siglip2_load_failure_propagates(monkeypatch):
 
 
 def test_unsupported_model_raises_clear_error():
-    """A model whose only backend was open_clip (None in MODEL_MAP) must raise a
-    clear 'no MLX backend' error, not silently serve the wrong/default model."""
+    """A model with no MLX backend (None in MODEL_MAP) must raise a clear
+    'no MLX backend' error, not silently serve the wrong/default model."""
     clip = _bare_for_load(UNSUPPORTED_NAME)
     with pytest.raises(RuntimeError) as ei:
         clip._load_model()
     msg = str(ei.value)
     assert UNSUPPORTED_NAME in msg, "error must name the unsupported model"
     assert "no MLX backend" in msg
-    assert "open_clip" in msg, "error must explain why it is unsupported now"
-    # And it must be in the documented supported list helper, not silently dropped.
+    # It must not appear in the supported-list helper either.
     assert UNSUPPORTED_NAME not in clip_module._supported_model_names()
 
 
-def test_open_clip_machinery_fully_removed():
-    """The open_clip fallback code is gone entirely (no dead attrs/helpers)."""
+def test_no_fallback_machinery():
+    """No fallback backend machinery exists (no dead attrs/helpers)."""
     for attr in ("_load_fallback", "_encode_image_fallback", "_encode_text_fallback"):
-        assert not hasattr(MLXClip, attr), f"{attr} should have been removed"
+        assert not hasattr(MLXClip, attr), f"{attr} must not exist"
     for name in (
         "OPENCLIP_MAP",
         "resolve_fallback_arch",
         "_allow_openclip_fallback",
         "_l2_normalize_torch",
     ):
-        assert not hasattr(clip_module, name), f"{name} should have been removed"
+        assert not hasattr(clip_module, name), f"{name} must not exist"
 
 
 def test_unknown_model_falls_back_to_mlx_default(monkeypatch):
-    """An unmapped name still resolves to the mlx_clip default (ViT-B-32); only
-    the open_clip fallback was removed, the mlx_clip path is unchanged."""
+    """An unmapped name resolves to the mlx_clip default (ViT-B-32)."""
     import mlx_clip as mlx_clip_module
 
     seen = {}

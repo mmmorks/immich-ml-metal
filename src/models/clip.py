@@ -36,8 +36,8 @@ def _l2_normalize(embedding: np.ndarray) -> np.ndarray:
     return embedding / norm if norm > 0 else embedding
 
 
-# Model name mapping: Immich name -> mlx_clip repo (or None = no MLX backend;
-# _load_model raises for those, since the open_clip fallback was removed in ml-b82)
+# Model name mapping: Immich name -> mlx_clip repo (or None = no MLX backend,
+# which makes _load_model raise a clear error rather than serving a wrong model)
 MODEL_MAP = {
     # OpenAI CLIP models -> MLX
     "ViT-B-32__openai": "mlx-community/clip-vit-base-patch32",
@@ -48,10 +48,8 @@ MODEL_MAP = {
     "ViT-B-32__laion2b_s34b_b79k": "mlx-community/clip-vit-base-patch32-laion2b",
     # SigLIP / SigLIP2 models. The SO400M SigLIP2 default is handled natively via
     # MLX_EMBEDDINGS_MAP below (checked first in _load_model). The ViT-B-16 SigLIP
-    # variants map to None: open_clip was their only backend, and it was removed
-    # (ml-b82) because its squash preprocessing diverges from the Immich index, so
-    # a request for one now raises a clear "no MLX backend" error in _load_model
-    # rather than silently serving non-parity vectors.
+    # variants have no MLX backend (None), so _load_model raises a clear error for
+    # them rather than silently serving non-parity vectors.
     "ViT-B-16-SigLIP__webli": None,
     "ViT-B-16-SigLIP2__webli": None,
     "ViT-SO400M-16-SigLIP2-384__webli": None,
@@ -60,7 +58,7 @@ MODEL_MAP = {
 }
 
 # Native MLX SigLIP2 backend via Blaizzy/mlx-embeddings. Maps Immich's
-# open_clip-style model name to the HF repo id the mlx-embeddings loader
+# CLIP model name to the HF repo id the mlx-embeddings loader
 # understands. The repo/dir name MUST contain a 'patchNN-NNN' token or the
 # loader's regex (which is the only patch_size source — config.json omits it)
 # crashes. mlx-embeddings loads the HF bf16 safetensors directly, so no
@@ -271,8 +269,8 @@ def _resolve_siglip2_tokenizer_json(path_or_repo: str) -> str:
 
 def _supported_model_names() -> list[str]:
     """CLIP model names this service can serve — native MLX SigLIP2 plus the
-    mlx_clip-backed OpenAI/LAION ports. There is no open_clip fallback (ml-b82),
-    so anything not listed here raises in ``_load_model``."""
+    mlx_clip-backed OpenAI/LAION ports. Anything not listed here raises in
+    ``_load_model``."""
     return sorted(MLX_EMBEDDINGS_MAP) + sorted(
         k for k, v in MODEL_MAP.items() if v is not None and k != "default"
     )
@@ -301,17 +299,15 @@ class MLXClip:
     def _load_model(self):
         """Load the native MLX backend for this model.
 
-        Parity with the upstream Immich ML server is the goal, so there is no
-        open_clip fallback (ml-b82): open_clip's bundled SigLIP transform squashes
-        (resize-to-square) instead of Immich's resize-shortest+center-crop and
-        would emit index-incompatible embeddings (~0.83 cosine). A model with no
-        MLX or native backend fails loudly here rather than silently serving
-        non-parity vectors.
+        Parity with the upstream Immich ML server is the goal: a model is served
+        only by a backend whose preprocessing matches Immich's (native MLX SigLIP2
+        or mlx_clip). A model with no such backend fails loudly here rather than
+        silently serving non-parity vectors.
         """
         # Native MLX SigLIP2 backend (mlx-embeddings) — the parity-faithful path
-        # for Immich's default model. A load failure raises (no fallback) so a
-        # partial cache / version drift can't silently poison the smart-search
-        # index; /health then reports degraded because no model loads.
+        # for Immich's default model. A load failure raises so a partial cache /
+        # version drift can't silently poison the smart-search index; /health
+        # then reports degraded because no model loads.
         if self.model_name in MLX_EMBEDDINGS_MAP:
             self._load_siglip2_mlx()
             return
@@ -319,15 +315,12 @@ class MLXClip:
         if self.model_name in MODEL_MAP:
             self._repo_id = MODEL_MAP[self.model_name]
             if self._repo_id is None:
-                # An explicitly-listed model whose only backend was open_clip
-                # (the SigLIP v1/v2 ViT-B-16 variants). open_clip was removed, so
-                # there is nothing parity-faithful to serve — fail clearly rather
-                # than silently substituting the wrong (default) model.
+                # An explicitly-listed model with no MLX backend (the SigLIP v1/v2
+                # ViT-B-16 variants). Fail clearly rather than silently
+                # substituting the wrong (default) model.
                 raise RuntimeError(
-                    f"CLIP model '{self.model_name}' has no MLX backend. The open_clip "
-                    f"fallback was removed because its SigLIP preprocessing diverges from "
-                    f"the Immich index (ml-b82); only models with a native MLX or mlx_clip "
-                    f"port are served. Supported: {_supported_model_names()}."
+                    f"CLIP model '{self.model_name}' has no MLX backend; only models with a "
+                    f"native MLX or mlx_clip port are served. Supported: {_supported_model_names()}."
                 )
         else:
             logger.warning(f"Unknown CLIP model '{self.model_name}', using MLX default (ViT-B-32)")
@@ -598,7 +591,7 @@ if __name__ == "__main__":
     import sys
 
     logger.info("Testing CLIP model loading...")
-    logger.info(f"Supported models (native MLX + mlx_clip, no open_clip): {_supported_model_names()}")
+    logger.info(f"Supported models (native MLX + mlx_clip): {_supported_model_names()}")
 
     logger.info("\n--- Testing MLX model ---")
     clip = get_clip_model("ViT-B-32__openai")

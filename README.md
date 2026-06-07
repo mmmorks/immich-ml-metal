@@ -140,10 +140,9 @@ Configure via environment variables or edit `src/config.py`:
 
 - Unknown/unmapped model name: served by the default `mlx-community/clip-vit-base-patch32`
 
-These ViT-B-16 SigLIP variants used to be served by an open_clip fallback, which
-was removed (see [No open_clip fallback](#no-open_clip-fallback)). Requesting one
-now raises a clear "no MLX backend" error rather than silently serving non-parity
-embeddings.
+The ViT-B-16 SigLIP variants have no MLX backend, so requesting one raises a clear
+"no MLX backend" error rather than silently serving non-parity embeddings (see
+[Parity-or-fail](#parity-or-fail)).
 
 ### Native SigLIP2 backend
 
@@ -242,35 +241,31 @@ export ML_SIGLIP2_MLX_PATH=$PWD/models/quant_eval/siglip2-so400m-patch16-384-8bi
 Revisit a true default change once mlx-embeddings can quantize the SigLIP vision
 attention (that's where the real memory/latency win for an image workload lives).
 
-### No open_clip fallback
+### Parity-or-fail
 
-There used to be an open_clip + PyTorch/MPS fallback as a best-effort safety net.
-**It was removed** (ml-b82) because it was the only inference path that broke
-parity with the upstream Immich ML server.
+A CLIP model is served only by a backend whose preprocessing matches the upstream
+Immich ML server. There is **no degrade-to-a-different-backend safety net**,
+because a wrong-but-working backend poisons the smart-search index invisibly —
+worse than failing, since the damage only surfaces later as degraded search.
 
-The reason is preprocessing. Upstream Immich's `OpenClipVisualEncoder.transform`
-hardcodes resize-shortest-side + center-crop for *every* CLIP model — it ignores
-open_clip's `resize_mode`. open_clip's own bundled transform, by contrast,
-**squashes** SigLIP inputs to a square. So an open_clip fallback embedding for
-`ViT-SO400M-16-SigLIP2-384__webli` lands at only ~0.83 cosine vs the existing
-smart-search index, and indexing anything through it silently poisons the index
-— with only a log line as signal. "Degrade to a wrong-but-working backend" is
-worse than failing, because the damage is invisible until search quality drops.
+The hazard is preprocessing. Upstream Immich's `OpenClipVisualEncoder.transform`
+hardcodes resize-shortest-side + center-crop for *every* CLIP model. A generic
+SigLIP transform, by contrast, **squashes** inputs to a square, which lands at
+only ~0.83 cosine vs the existing index for `ViT-SO400M-16-SigLIP2-384__webli`.
 
-So the policy now is parity-or-fail:
+So:
 
 - The native MLX SigLIP2 backend is upstream-faithful (it reuses Immich's exact
   transform; see [Native SigLIP2 backend](#native-siglip2-backend)). A load
-  failure **raises** rather than falling back, so a partial cache / version drift
-  can't poison the index; `/health` then reports degraded.
+  failure **raises**, so a partial cache / version drift can't poison the index;
+  `/health` then reports degraded.
 - OpenAI/LAION CLIP models are served by `mlx-clip`.
 - A model with no native/MLX backend (the `ViT-B-16-SigLIP*` variants) **raises a
   clear "no MLX backend" error** instead of silently serving non-parity vectors.
 
-This also drops `open-clip-torch` (and `torchvision`/`timm`) from the install.
-`torch` itself is still pulled in by `mlx-clip`. The `scripts/embedding_parity.py`
-`openclip` diagnostic still exists as a regression witness; install `open-clip-torch`
-manually if you want to run it.
+`scripts/embedding_parity.py` has an optional `openclip` diagnostic backend (a
+regression witness for the squash-vs-crop divergence); `pip install open-clip-torch`
+to run it.
 
 **Face Models**:
 - `buffalo_s`
