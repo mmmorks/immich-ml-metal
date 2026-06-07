@@ -179,6 +179,28 @@ def _siglip2_hf_repo() -> str:
     return os.getenv("ML_SIGLIP2_HF_REPO", "mlx-community/siglip2-so400m-patch16-384").strip()
 
 
+def _allow_openclip_fallback() -> bool:
+    """Whether an index-critical native-SigLIP2 load failure may fall back to open_clip.
+
+    Default OFF (ml-7j8.11). The native mlx-embeddings SigLIP2 backend is the
+    parity-verified path whose embeddings align with the existing smart-search
+    index. The open_clip fallback uses SigLIP *squash* preprocessing
+    (resize-to-square) instead of Immich's resize-shortest+center-crop, so its
+    image embeddings sit at ~0.83 cosine vs the index — indexing anything through
+    it silently poisons the index with only a log line as signal, breaking the
+    project's drop-in / no-reindex guarantee. So a native load failure for a
+    model in ``MLX_EMBEDDINGS_MAP`` fails loudly by default; set
+    ``ML_SIGLIP2_ALLOW_OPENCLIP_FALLBACK=1`` to explicitly trade correctness for
+    availability and accept the degraded, index-incompatible embeddings.
+    """
+    return os.getenv("ML_SIGLIP2_ALLOW_OPENCLIP_FALLBACK", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 def _download_siglip2_repo(hf_repo: str, out: Path) -> bool:
     """Snapshot a pre-converted fp16 SigLIP2 repo into the local cache dir.
 
@@ -344,7 +366,28 @@ class MLXClip:
                 return
             except Exception as e:
                 logger.error(f"mlx-embeddings SigLIP2 load failed: {e}", exc_info=True)
-                logger.info("Falling back to open_clip for SigLIP2")
+                if not _allow_openclip_fallback():
+                    # ml-7j8.11: the open_clip fallback serves SigLIP-squash
+                    # embeddings (~0.83 cosine vs the index), so silently using
+                    # it for this parity-verified model would poison the smart-
+                    # search index with only a log line as signal. Fail loudly
+                    # instead — /health then reports degraded because no model
+                    # loads, surfacing the failure rather than hiding it.
+                    raise RuntimeError(
+                        f"Native SigLIP2 backend failed to load for index-critical model "
+                        f"'{self.model_name}'; refusing to silently serve open_clip embeddings. "
+                        f"open_clip uses SigLIP-squash preprocessing that is INCOMPATIBLE with the "
+                        f"existing smart-search index (~0.83 cosine), so indexing through it would "
+                        f"poison the index (see ml-7j8.11). Fix the native mlx-embeddings load, or set "
+                        f"ML_SIGLIP2_ALLOW_OPENCLIP_FALLBACK=1 to explicitly accept degraded, "
+                        f"index-incompatible embeddings."
+                    ) from e
+                logger.warning(
+                    "ML_SIGLIP2_ALLOW_OPENCLIP_FALLBACK is set: falling back to open_clip for "
+                    f"'{self.model_name}'. Embeddings will use SigLIP-squash preprocessing and are "
+                    "INCOMPATIBLE with the existing smart-search index (~0.83 cosine vs native); "
+                    "re-index smart search if you index anything while in this mode."
+                )
                 self._load_fallback()
                 return
 

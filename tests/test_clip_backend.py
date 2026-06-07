@@ -265,6 +265,82 @@ def test_mlx_embeddings_map_repos_have_patch_token():
         assert pat.search(repo), f"{name} -> {repo!r} lacks a patchNN-NNN token"
 
 
+# --- Native SigLIP2 load-failure guard (ml-7j8.11) ---------------------------
+#
+# The open_clip fallback serves SigLIP-*squash* embeddings (~0.83 cosine vs the
+# existing index), so silently using it when the parity-verified native backend
+# fails to load would poison the smart-search index with only a log line as
+# signal. For the index-critical native model the load must fail LOUDLY by
+# default; an explicit opt-in env var trades correctness for availability.
+
+
+def _bare_for_load(name=SIGLIP2_NAME):
+    """A bare MLXClip with just enough state to call _load_model()."""
+    clip = object.__new__(MLXClip)
+    clip.model_name = name
+    return clip
+
+
+def test_native_siglip2_load_failure_raises_by_default(monkeypatch):
+    monkeypatch.delenv("ML_SIGLIP2_ALLOW_OPENCLIP_FALLBACK", raising=False)
+
+    def boom(self):
+        raise RuntimeError("native backend exploded")
+
+    fell_back = []
+    monkeypatch.setattr(MLXClip, "_load_siglip2_mlx", boom)
+    monkeypatch.setattr(MLXClip, "_load_fallback", lambda self: fell_back.append(True))
+
+    clip = _bare_for_load()
+    with pytest.raises(RuntimeError) as ei:
+        clip._load_model()
+
+    assert not fell_back, "must NOT silently fall back to open_clip for the index-critical model"
+    msg = str(ei.value)
+    assert SIGLIP2_NAME in msg, "error must name the affected index-critical model"
+    assert "ML_SIGLIP2_ALLOW_OPENCLIP_FALLBACK" in msg, "error must point at the opt-in escape hatch"
+    # The original cause is chained for debuggability.
+    assert isinstance(ei.value.__cause__, RuntimeError)
+
+
+@pytest.mark.parametrize("flag", ["1", "true", "YES", "on"])
+def test_native_siglip2_load_failure_opt_in_allows_fallback(monkeypatch, flag):
+    monkeypatch.setenv("ML_SIGLIP2_ALLOW_OPENCLIP_FALLBACK", flag)
+
+    def boom(self):
+        raise RuntimeError("native backend exploded")
+
+    fell_back = []
+    monkeypatch.setattr(MLXClip, "_load_siglip2_mlx", boom)
+    monkeypatch.setattr(MLXClip, "_load_fallback", lambda self: fell_back.append(True))
+
+    clip = _bare_for_load()
+    clip._load_model()  # must NOT raise
+
+    assert fell_back == [True], "explicit opt-in must permit the open_clip fallback"
+
+
+def test_native_siglip2_successful_load_never_falls_back(monkeypatch):
+    """The happy path must not touch the fallback regardless of the env flag."""
+    monkeypatch.delenv("ML_SIGLIP2_ALLOW_OPENCLIP_FALLBACK", raising=False)
+
+    loaded = []
+    fell_back = []
+    monkeypatch.setattr(MLXClip, "_load_siglip2_mlx", lambda self: loaded.append(True))
+    monkeypatch.setattr(MLXClip, "_load_fallback", lambda self: fell_back.append(True))
+
+    clip = _bare_for_load()
+    clip._load_model()
+
+    assert loaded == [True]
+    assert not fell_back
+
+
+def test_allow_openclip_fallback_default_off(monkeypatch):
+    monkeypatch.delenv("ML_SIGLIP2_ALLOW_OPENCLIP_FALLBACK", raising=False)
+    assert clip_module._allow_openclip_fallback() is False
+
+
 # --- SigLIP2 tokenizer source resolution (ml-qax) ----------------------------
 
 
