@@ -6,15 +6,22 @@ self._model=None on the instance an in-flight encode_*() call still holds.
 The retry loops must notice the swap-to-None and raise a clean RuntimeError
 instead of an AttributeError on None.img_processor / None.encode_image.
 """
+import importlib.util
 import io
 import threading
 
 import numpy as np
 import pytest
-import torch
 from PIL import Image
 
 from src.models.clip import MLXClip
+
+# torch is only needed by the open_clip fallback path; the MLX (mlx_clip) and
+# native SigLIP2 (mlx-embeddings) paths don't. Skip the fallback tests (and
+# import torch locally) so the rest of this suite runs without torch installed.
+requires_torch = pytest.mark.skipif(
+    importlib.util.find_spec("torch") is None, reason="torch not installed"
+)
 
 
 def _red_jpeg() -> bytes:
@@ -58,13 +65,18 @@ def _bare_clip(model, *, fallback=False):
     clip = object.__new__(MLXClip)
     clip.model_name = "ViT-B-32__openai"
     clip._model = model
-    clip._processor = (lambda img: torch.zeros(3, 4, 4)) if fallback else None
-    clip._tokenizer = (lambda texts: torch.zeros(1, 4, dtype=torch.long)) if fallback else None
     clip._loaded = True
     clip._inference_lock = threading.Lock()
     if fallback:
+        import torch
+
+        clip._processor = lambda img: torch.zeros(3, 4, 4)
+        clip._tokenizer = lambda texts: torch.zeros(1, 4, dtype=torch.long)
         clip._use_fallback = True
         clip._device = torch.device("cpu")
+    else:
+        clip._processor = None
+        clip._tokenizer = None
     return clip
 
 
@@ -114,6 +126,7 @@ def test_encode_text_unloaded_midflight_no_attributeerror():
         clip.encode_text("a photo of a cat")
 
 
+@requires_torch
 def test_encode_image_fallback_unloaded_midflight_no_attributeerror():
     clip = _bare_clip(object(), fallback=True)
     clip._model = None
@@ -121,8 +134,157 @@ def test_encode_image_fallback_unloaded_midflight_no_attributeerror():
         clip.encode_image(_red_jpeg())
 
 
+@requires_torch
 def test_encode_text_fallback_unloaded_midflight_no_attributeerror():
     clip = _bare_clip(object(), fallback=True)
     clip._model = None
     with pytest.raises(RuntimeError):
         clip.encode_text("a photo of a cat")
+
+
+# --- Native SigLIP2 backend (mlx-embeddings) — ml-ycd.5 -----------------------
+#
+# These guard the metal_lock contract for the new backend: MLX work is lazy, so
+# get_*_features() output MUST be materialized (np.array) *inside* the inference
+# lock — otherwise un-evaluated Metal buffers can collide with a concurrent
+# Vision (face/OCR) call and crash the process. They also cover the same
+# swap-to-None race as the mlx_clip/fallback paths above. No torch, no real
+# weights, no PyObjC needed.
+
+
+class _FakeSiglip2Processor:
+    """Stand-in for the SiglipProcessor returned by mlx_embeddings.load().
+
+    Callable with images=... or text=...; returns the dict key clip.py reads.
+    The first call optionally blocks until ``proceed`` so a test can swap the
+    model out while preprocessing is in flight (it runs outside the lock).
+    """
+
+    def __init__(self, started=None, proceed=None):
+        self._started = started
+        self._proceed = proceed
+        self._first = True
+
+    def __call__(self, images=None, text=None, **kwargs):
+        if self._first and self._started is not None:
+            self._first = False
+            self._started.set()
+            self._proceed.wait(5)
+        if images is not None:
+            return {"pixel_values": "pixels"}
+        return {"input_ids": "ids"}
+
+
+class _FakeSiglip2Model:
+    """Stand-in for an mlx-embeddings SigLIP2 model.
+
+    get_image_features / get_text_features return an object whose [0] yields a
+    probe; converting that probe with np.array() (as clip.py does to force eval)
+    records whether ``lock`` was held at materialization time.
+    """
+
+    def __init__(self, eval_record=None, lock=None):
+        self._eval_record = eval_record
+        self._lock = lock
+
+    def _features(self):
+        record, lock = self._eval_record, self._lock
+
+        class _Probe:
+            def __array__(self, dtype=None, copy=None):
+                if record is not None and lock is not None:
+                    record.append(lock.locked())
+                arr = np.ones(1152, dtype=np.float32)
+                return arr.astype(dtype) if dtype is not None else arr
+
+        class _Feats:
+            def __getitem__(self, idx):
+                return _Probe()
+
+        return _Feats()
+
+    def get_image_features(self, pixel_values=None):
+        return self._features()
+
+    def get_text_features(self, input_ids=None):
+        return self._features()
+
+
+def _bare_siglip2(model, processor):
+    """Build a SigLIP2-backed MLXClip without loading real weights."""
+    clip = object.__new__(MLXClip)
+    clip.model_name = "ViT-SO400M-16-SigLIP2-384__webli"
+    clip._model = model
+    clip._processor = processor
+    clip._tokenizer = None
+    clip._loaded = True
+    clip._inference_lock = threading.Lock()
+    clip._use_mlx_embeddings = True
+    return clip
+
+
+def test_encode_image_siglip2_unloaded_midflight_no_attributeerror():
+    clip = _bare_siglip2(_FakeSiglip2Model(), _FakeSiglip2Processor())
+    clip._model = None  # mid-flight null, top-of-method check already passed
+    with pytest.raises(RuntimeError):
+        clip.encode_image(_red_jpeg())
+
+
+def test_encode_text_siglip2_unloaded_midflight_no_attributeerror():
+    clip = _bare_siglip2(_FakeSiglip2Model(), _FakeSiglip2Processor())
+    clip._model = None
+    with pytest.raises(RuntimeError):
+        clip.encode_text("a photo of a cat")
+
+
+def test_encode_image_siglip2_concurrent_unload_raises_clean_error():
+    """Model unloaded while preprocessing is in flight -> clean RuntimeError."""
+    started = threading.Event()
+    proceed = threading.Event()
+    clip = _bare_siglip2(_FakeSiglip2Model(), _FakeSiglip2Processor(started, proceed))
+
+    result = {}
+
+    def worker():
+        try:
+            result["value"] = clip.encode_image(_red_jpeg())
+        except BaseException as e:  # noqa: BLE001 - capture whatever escapes
+            result["error"] = e
+
+    t = threading.Thread(target=worker)
+    t.start()
+
+    assert started.wait(5), "encode_image never began preprocessing"
+    clip.unload()  # concurrent model switch nulls self._model
+    proceed.set()
+    t.join(10)
+    assert not t.is_alive(), "worker thread hung"
+
+    assert "value" not in result, f"expected failure, got {result.get('value')!r}"
+    err = result.get("error")
+    assert isinstance(err, RuntimeError), f"expected RuntimeError, got {err!r}"
+    assert not isinstance(err, AttributeError), "swap-to-None leaked an AttributeError"
+
+
+def test_encode_image_siglip2_forces_eval_inside_lock():
+    """get_image_features output must be materialized while the lock is held."""
+    record = []
+    clip = _bare_siglip2(None, _FakeSiglip2Processor())
+    clip._model = _FakeSiglip2Model(eval_record=record, lock=clip._inference_lock)
+
+    emb = clip.encode_image(_red_jpeg())
+
+    assert emb.shape == (1152,) and emb.dtype == np.float32
+    assert record == [True], f"Metal eval must occur inside the lock, got {record}"
+
+
+def test_encode_text_siglip2_forces_eval_inside_lock():
+    """get_text_features output must be materialized while the lock is held."""
+    record = []
+    clip = _bare_siglip2(None, _FakeSiglip2Processor())
+    clip._model = _FakeSiglip2Model(eval_record=record, lock=clip._inference_lock)
+
+    emb = clip.encode_text("a photo of a cat")
+
+    assert emb.shape == (1152,) and emb.dtype == np.float32
+    assert record == [True], f"Metal eval must occur inside the lock, got {record}"
