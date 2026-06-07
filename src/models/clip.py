@@ -186,6 +186,13 @@ class MLXClip:
         # current model and try once more.
         for attempt in range(2):
             model_ref = self._model
+            if model_ref is None:
+                # A concurrent get_clip_model() switched models and unloaded
+                # the instance we still hold (self._model -> None). Bail out
+                # cleanly instead of crashing on None.img_processor.
+                raise RuntimeError(
+                    "CLIP model was unloaded during a concurrent model switch"
+                )
             processed = model_ref.img_processor([image])
 
             with self._inference_lock:
@@ -225,6 +232,10 @@ class MLXClip:
 
         for attempt in range(2):
             model_ref = self._model
+            if model_ref is None:
+                raise RuntimeError(
+                    "CLIP model was unloaded during a concurrent model switch"
+                )
             image_tensor = self._processor(image).unsqueeze(0).to(self._device)
 
             with self._inference_lock:
@@ -260,7 +271,12 @@ class MLXClip:
             return self._encode_text_fallback(text)
 
         with self._inference_lock:
-            embedding = self._model.text_encoder(text)
+            model_ref = self._model
+            if model_ref is None:
+                raise RuntimeError(
+                    "CLIP model was unloaded during a concurrent model switch"
+                )
+            embedding = model_ref.text_encoder(text)
             if isinstance(embedding, mx.array):
                 embedding = np.array(embedding)
             embedding = embedding / np.linalg.norm(embedding)
@@ -277,6 +293,10 @@ class MLXClip:
 
         for attempt in range(2):
             model_ref = self._model
+            if model_ref is None:
+                raise RuntimeError(
+                    "CLIP model was unloaded during a concurrent model switch"
+                )
             tokens = self._tokenizer([text]).to(self._device)
 
             with self._inference_lock:
