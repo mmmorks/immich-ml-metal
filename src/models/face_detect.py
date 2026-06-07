@@ -14,6 +14,39 @@ from PIL import Image
 logger = logging.getLogger(__name__)
 
 
+def _clamp(value: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, value))
+
+
+def _vision_bbox_to_pixels(
+    origin_x: float,
+    origin_y: float,
+    width: float,
+    height: float,
+    img_width: int,
+    img_height: int,
+) -> dict[str, int]:
+    """Convert a Vision normalized bbox to clamped image pixel coordinates.
+
+    Vision uses a bottom-left origin in normalized [0,1] coords; image pixels
+    use a top-left origin (so the Y axis is flipped). Vision can report boxes
+    that extend past the image edges, so each coordinate is clamped to the
+    image bounds. Both endpoints pass through the same monotonic clamp, so
+    x2>=x1 and y2>=y1 are preserved.
+    """
+    x1 = origin_x * img_width
+    y1 = (1.0 - origin_y - height) * img_height
+    x2 = (origin_x + width) * img_width
+    y2 = (1.0 - origin_y) * img_height
+
+    x1 = _clamp(x1, 0, img_width)
+    y1 = _clamp(y1, 0, img_height)
+    x2 = _clamp(x2, 0, img_width)
+    y2 = _clamp(y2, 0, img_height)
+
+    return {"x1": int(x1), "y1": int(y1), "x2": int(x2), "y2": int(y2)}
+
+
 def detect_faces(image_bytes: bytes) -> tuple[list[dict], int, int]:
     """
     Detect faces using Apple's Vision framework.
@@ -65,14 +98,16 @@ def _detect_faces_impl(image_bytes: bytes, img_width: int, img_height: int) -> t
         for observation in results:
             bbox = observation.boundingBox()
 
-            # Convert to pixel coordinates (flip Y axis - Vision uses bottom-left origin)
-            x1 = bbox.origin.x * img_width
-            y1 = (1.0 - bbox.origin.y - bbox.size.height) * img_height
-            x2 = (bbox.origin.x + bbox.size.width) * img_width
-            y2 = (1.0 - bbox.origin.y) * img_height
-
+            # Convert to pixel coordinates (flips Y axis, clamps to image bounds)
             face_data = {
-                "boundingBox": {"x1": int(x1), "y1": int(y1), "x2": int(x2), "y2": int(y2)},
+                "boundingBox": _vision_bbox_to_pixels(
+                    bbox.origin.x,
+                    bbox.origin.y,
+                    bbox.size.width,
+                    bbox.size.height,
+                    img_width,
+                    img_height,
+                ),
                 "score": float(observation.confidence()),
             }
 
