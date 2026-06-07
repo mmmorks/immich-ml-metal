@@ -124,8 +124,11 @@ def _detect_faces_impl(
         success, error = handler.performRequests_error_([request], None)
 
         if not success or error:
-            logger.error(f"Vision framework error: {error}")
-            return [], img_width, img_height
+            # Hard Vision-framework failure — raise so Immich retries rather
+            # than recording a false "no faces" result that permanently drops
+            # the asset's faces. A successful request with zero observations
+            # falls through to an empty face list below.
+            raise RuntimeError(f"Vision face request failed: {error}")
 
         faces = []
         results = request.results() or []
@@ -158,8 +161,12 @@ def _detect_faces_impl(
         return faces, img_width, img_height
 
     except Exception as e:
+        # Unexpected hard failure during detection — log with traceback, then
+        # re-raise so the request fails and Immich retries rather than storing a
+        # false "no faces" result. A genuinely face-free image returns an empty
+        # list above without raising.
         logger.error(f"Face detection failed: {e}", exc_info=True)
-        return [], img_width, img_height
+        raise
 
 
 def extract_five_point_landmarks(

@@ -75,6 +75,65 @@ def test_ocr_raises_on_unexpected_exception(monkeypatch):
         ocr.recognize_text(_blank_image_bytes())
 
 
+# --- Face detection ---
+
+
+def test_face_detect_raises_on_undecodable_image():
+    """A hard decode failure in detection must raise, not return an empty face
+    list that would mark the asset permanently processed."""
+    import src.models.face_detect as face_detect
+
+    with pytest.raises(ValueError, match="Invalid image data"):
+        face_detect.detect_faces(b"this is not an image")
+
+
+def test_face_detect_returns_empty_for_face_free_image():
+    """A genuinely face-free image still returns a structurally-empty result
+    without raising — the empty case stays distinguishable from a failure."""
+    import src.models.face_detect as face_detect
+
+    faces, w, h = face_detect.detect_faces(_blank_image_bytes())
+    assert faces == []
+    assert (w, h) == (200, 80)
+
+
+def test_face_detect_raises_on_vision_error(monkeypatch):
+    """A Vision request that reports failure must raise rather than silently
+    return an empty face list."""
+    import src.models.face_detect as face_detect
+
+    class _FakeHandler:
+        def initWithData_options_(self, *a):
+            return self
+
+        def performRequests_error_(self, *a):
+            return (False, "vision boom")
+
+    class _FakeHandlerCls:
+        @staticmethod
+        def alloc():
+            return _FakeHandler()
+
+    monkeypatch.setattr(face_detect.Vision, "VNImageRequestHandler", _FakeHandlerCls)
+    with pytest.raises(RuntimeError, match="Vision face request failed"):
+        face_detect.detect_faces(_blank_image_bytes())
+
+
+def test_face_detect_raises_on_unexpected_exception(monkeypatch):
+    """An unexpected exception inside the detection impl must propagate, not be
+    swallowed into an empty face list."""
+    import src.models.face_detect as face_detect
+
+    class _BoomNSData:
+        @staticmethod
+        def dataWithBytes_length_(*a):
+            raise RuntimeError("ns data boom")
+
+    monkeypatch.setattr(face_detect, "NSData", _BoomNSData)
+    with pytest.raises(RuntimeError, match="ns data boom"):
+        face_detect.detect_faces(_blank_image_bytes())
+
+
 # --- Face recognition ---
 
 
