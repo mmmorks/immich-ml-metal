@@ -41,8 +41,13 @@ class Settings:
     host: str = "0.0.0.0"
     port: int = 3003
 
-    # CLIP settings - using smaller model for low-memory systems
-    clip_model: str = "ViT-B-32__openai"
+    # CLIP settings. Defaults to the SigLIP2 model Immich requests by default for
+    # smart search — it runs on the native MLX backend and needs no torch. (The
+    # OpenAI CLIP ports also work but need a one-time torch conversion; see
+    # requirements.txt.) Immich sends the model name per request, so this is only a
+    # fallback for requests that omit it; keeping it torch-free keeps a default,
+    # torch-free install fully functional.
+    clip_model: str = "ViT-SO400M-16-SigLIP2-384__webli"
 
     # Face recognition settings
     # buffalo_l is Immich's default, provides best accuracy
@@ -83,7 +88,7 @@ class Settings:
         return cls(
             host=os.getenv("ML_HOST", "0.0.0.0"),
             port=int(os.getenv("ML_PORT", "3003")),
-            clip_model=os.getenv("ML_CLIP_MODEL", "ViT-B-32__openai"),
+            clip_model=os.getenv("ML_CLIP_MODEL", "ViT-SO400M-16-SigLIP2-384__webli"),
             face_model=os.getenv("ML_FACE_MODEL", "buffalo_l"),
             face_min_score=float(os.getenv("ML_FACE_MIN_SCORE", "0.7")),
             ocr_use_language_correction=os.getenv("ML_OCR_LANGUAGE_CORRECTION", "true").lower() == "true",

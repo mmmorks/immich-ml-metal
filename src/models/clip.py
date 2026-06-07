@@ -719,7 +719,7 @@ def get_loaded_clip_model_name() -> str | None:
     return _current_model_name
 
 
-def get_clip_model(model_name: str = "ViT-B-32__openai") -> MLXClip:
+def get_clip_model(model_name: str = "ViT-SO400M-16-SigLIP2-384__webli") -> MLXClip:
     """
     Get CLIP model, loading or switching as needed (thread-safe).
 

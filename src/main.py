@@ -291,7 +291,7 @@ async def log_requests(request: Request, call_next):
     return response
 
 
-def get_clip(model_name: str = "ViT-B-32__openai"):
+def get_clip(model_name: str = "ViT-SO400M-16-SigLIP2-384__webli"):
     """Get CLIP model, loading on first use or switching if model changed.
 
     Marks CLIP as busy (unload-protected) during load. Callers must call
@@ -402,9 +402,10 @@ async def health():
         if not STUB_MODE:
             # Check CLIP model. Reuse the already-loaded model if any, so the
             # probe never evicts the production model from the single CLIP slot.
-            # settings.clip_model defaults to ViT-B-32__openai, which may differ
-            # from the model Immich actually requests (e.g. SigLIP2) — probing the
-            # default would force a switch and thrash the cache on every health hit.
+            # Reuse the loaded model rather than settings.clip_model: even though
+            # the default now matches Immich's default request (SigLIP2), a user
+            # may run a different model, and probing settings.clip_model would force
+            # a switch and thrash the single CLIP slot on every health hit.
             try:
                 from .models.clip import get_loaded_clip_model_name
 
