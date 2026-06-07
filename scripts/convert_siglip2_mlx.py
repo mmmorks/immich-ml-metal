@@ -65,6 +65,25 @@ def _require_patch_token(value: str, flag: str) -> None:
         )
 
 
+def _upload_existing(path: Path, upload_repo: str, hf_path: str) -> None:
+    """Publish an already-converted, self-contained dir without re-converting.
+
+    The normal convert() path uploads via mlx_embeddings' upload_to_hub right
+    after writing weights. When the cache is already complete we skip convert(),
+    so replicate just the upload step here — the dir is self-contained (weights +
+    config + tokenizer), so the only extra input upload_to_hub needs is the
+    config dict, which we read back from config.json. Without this, --upload-repo
+    on a complete cache silently no-ops and still exits 0 (ml-5zl).
+    """
+    import json
+
+    from mlx_embeddings.utils import upload_to_hub
+
+    config = json.loads((path / "config.json").read_text())
+    print(f"[upload] publishing existing convert {path} -> {upload_repo}")
+    upload_to_hub(str(path), upload_repo, hf_path, config)
+
+
 def _verify_load(path: Path) -> None:
     """Load the converted dir and run a tiny image+text encode as a smoke test.
 
@@ -161,10 +180,7 @@ def main() -> int:
         if args.verify:
             _verify_load(out)
         if args.upload_repo:
-            print(
-                "[note] --upload-repo with an existing convert: re-run with "
-                "--force to convert+upload, or upload the dir manually."
-            )
+            _upload_existing(out, args.upload_repo, args.hf_path)
         return 0
 
     out.parent.mkdir(parents=True, exist_ok=True)

@@ -74,3 +74,57 @@ def test_rejects_missing_token():
 def test_error_message_names_the_flag():
     with pytest.raises(ValueError, match="--upload-repo"):
         mod._require_patch_token("mmmorks/my-weights", "--upload-repo")
+
+
+# --- --upload-repo on an already-complete cache (ml-5zl) -------------------
+
+
+def test_upload_existing_reads_config_and_uploads(tmp_path, monkeypatch):
+    """_upload_existing must reconstruct upload_to_hub's `config` arg from the
+    dir's config.json and forward the dir path + repo + hf_path unchanged."""
+    import json
+
+    import mlx_embeddings.utils as utils
+
+    (tmp_path / "config.json").write_text(json.dumps({"vision_config": {}}))
+    calls = []
+    monkeypatch.setattr(
+        utils, "upload_to_hub", lambda *a, **k: calls.append((a, k))
+    )
+
+    mod._upload_existing(tmp_path, "mmmorks/siglip2-so400m-patch16-384", "google/x")
+
+    assert len(calls) == 1
+    (path, repo, hf_path, config), _ = calls[0]
+    assert path == str(tmp_path)
+    assert repo == "mmmorks/siglip2-so400m-patch16-384"
+    assert hf_path == "google/x"
+    assert config == {"vision_config": {}}
+
+
+def test_main_uploads_when_cache_complete(tmp_path, monkeypatch):
+    """The ml-5zl regression: with a complete cache and no --force, passing
+    --upload-repo must still publish (not silently return 0 with only a note)."""
+    out = tmp_path / "siglip2-so400m-patch16-384"
+    out.mkdir()
+
+    monkeypatch.setattr(mod, "siglip2_dir_is_complete", lambda _p: True)
+    uploaded = []
+    monkeypatch.setattr(
+        mod, "_upload_existing", lambda *a: uploaded.append(a)
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "convert_siglip2_mlx.py",
+            "--mlx-path",
+            str(out),
+            "--upload-repo",
+            "mmmorks/siglip2-so400m-patch16-384",
+        ],
+    )
+
+    assert mod.main() == 0
+    assert len(uploaded) == 1
+    assert uploaded[0][0] == out
+    assert uploaded[0][1] == "mmmorks/siglip2-so400m-patch16-384"
