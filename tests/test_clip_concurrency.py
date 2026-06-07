@@ -7,7 +7,6 @@ The retry loops must notice the swap-to-None and raise a clean RuntimeError
 instead of an AttributeError on None.img_processor / None.encode_image.
 """
 
-import importlib.util
 import io
 import threading
 
@@ -16,11 +15,6 @@ import pytest
 from PIL import Image
 
 from src.models.clip import MLXClip
-
-# torch is only needed by the open_clip fallback path; the MLX (mlx_clip) and
-# native SigLIP2 (mlx-embeddings) paths don't. Skip the fallback tests (and
-# import torch locally) so the rest of this suite runs without torch installed.
-requires_torch = pytest.mark.skipif(importlib.util.find_spec("torch") is None, reason="torch not installed")
 
 
 def _red_jpeg() -> bytes:
@@ -59,23 +53,15 @@ class _FakeMLXModel:
         return np.ones(8, dtype=np.float32)
 
 
-def _bare_clip(model, *, fallback=False):
+def _bare_clip(model):
     """Build an MLXClip without loading real weights."""
     clip = object.__new__(MLXClip)
     clip.model_name = "ViT-B-32__openai"
     clip._model = model
     clip._loaded = True
     clip._inference_lock = threading.Lock()
-    if fallback:
-        import torch
-
-        clip._processor = lambda img: torch.zeros(3, 4, 4)
-        clip._tokenizer = lambda texts: torch.zeros(1, 4, dtype=torch.long)
-        clip._use_fallback = True
-        clip._device = torch.device("cpu")
-    else:
-        clip._processor = None
-        clip._tokenizer = None
+    clip._processor = None
+    clip._tokenizer = None
     return clip
 
 
@@ -120,22 +106,6 @@ def test_encode_image_unloaded_midflight_no_attributeerror():
 
 def test_encode_text_unloaded_midflight_no_attributeerror():
     clip = _bare_clip(_FakeMLXModel())
-    clip._model = None
-    with pytest.raises(RuntimeError):
-        clip.encode_text("a photo of a cat")
-
-
-@requires_torch
-def test_encode_image_fallback_unloaded_midflight_no_attributeerror():
-    clip = _bare_clip(object(), fallback=True)
-    clip._model = None
-    with pytest.raises(RuntimeError):
-        clip.encode_image(_red_jpeg())
-
-
-@requires_torch
-def test_encode_text_fallback_unloaded_midflight_no_attributeerror():
-    clip = _bare_clip(object(), fallback=True)
     clip._model = None
     with pytest.raises(RuntimeError):
         clip.encode_text("a photo of a cat")

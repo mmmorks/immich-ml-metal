@@ -8,7 +8,7 @@ A Metal/ANE-optimized drop-in replacement for [Immich's](https://immich.app/) ma
 
 Immich's standard ML container runs well on NVIDIA, Intel, and AMD GPUs. Recently, the community has had trouble running it natively on Apple's ML framework (particularly after OCR was implemented). This project is a drop-in replacement for Immich-ML that uses the same ML API but uses as many native Apple ML frameworks as possible:
 
-- **CLIP Embeddings**: MLX-accelerated for image/text search — including a native MLX SigLIP2 backend (Immich's default `ViT-SO400M-16-SigLIP2-384__webli`), with an open_clip/MPS fallback for other models
+- **CLIP Embeddings**: MLX-accelerated for image/text search — a native MLX SigLIP2 backend for Immich's default `ViT-SO400M-16-SigLIP2-384__webli`, plus mlx-clip for the OpenAI/LAION CLIP models
 - **Face Detection**: Apple Vision framework (runs on Neural Engine)
 - **Face Recognition**: InsightFace ArcFace with CoreML acceleration
 - **OCR**: Apple Vision framework text recognition
@@ -19,7 +19,7 @@ Apple Silicon has three independent compute units — GPU (Metal), Neural Engine
 
 | Task | Compute Unit | Framework |
 |------|-------------|-----------|
-| CLIP embedding | GPU (Metal) | MLX / mlx-embeddings (SigLIP2) / open_clip MPS |
+| CLIP embedding | GPU (Metal) | MLX / mlx-embeddings (SigLIP2) + mlx-clip |
 | Face detection | ANE | Apple Vision |
 | Face embedding | CPU / CoreML | InsightFace ONNX |
 | OCR | ANE | Apple Vision |
@@ -48,7 +48,7 @@ INFO: predict: 3 task(s) [clip+facial-recognition+ocr] completed in 135ms
 
 ** A(I)lpha Quality - Use at Your Own Risk**
 
-- [x] CLIP implementation (MLX, native MLX SigLIP2 backend, open_clip fallback)
+- [x] CLIP implementation (native MLX SigLIP2 backend + mlx-clip)
 - [x] Face detection (Vision framework)
 - [x] Face embeddings (InsightFace + CoreML)
 - [x] OCR (Vision framework)
@@ -134,15 +134,16 @@ Configure via environment variables or edit `src/config.py`:
   - `ViT-B-32__laion2b-s34b-b79k`-> `mlx-community/clip-vit-base-patch32-laion2b`
   - `ViT-B-32__laion2b_s34b_b79k`-> `mlx-community/clip-vit-base-patch32-laion2b`
 
-- Other SigLIP models -> open_clip fallback (MPS)
+- Other SigLIP models -> **unsupported** (no MLX backend; raises a clear error)
   - `ViT-B-16-SigLIP__webli`
   - `ViT-B-16-SigLIP2__webli`
 
-- Default fallback: `mlx-community/clip-vit-base-patch32`
+- Unknown/unmapped model name: served by the default `mlx-community/clip-vit-base-patch32`
 
-Any model name not mapped above is resolved to an open_clip `(arch, pretrained)`
-pair by splitting on `__`, and any MLX load failure falls back to open_clip — see
-[The open_clip fallback](#the-open_clip-fallback).
+These ViT-B-16 SigLIP variants used to be served by an open_clip fallback, which
+was removed (see [No open_clip fallback](#no-open_clip-fallback)). Requesting one
+now raises a clear "no MLX backend" error rather than silently serving non-parity
+embeddings.
 
 ### Native SigLIP2 backend
 
@@ -241,23 +242,35 @@ export ML_SIGLIP2_MLX_PATH=$PWD/models/quant_eval/siglip2-so400m-patch16-384-8bi
 Revisit a true default change once mlx-embeddings can quantize the SigLIP vision
 attention (that's where the real memory/latency win for an image workload lives).
 
-### The open_clip fallback
+### No open_clip fallback
 
-The open_clip + PyTorch/MPS path is **kept** as a best-effort safety net. It
-covers:
+There used to be an open_clip + PyTorch/MPS fallback as a best-effort safety net.
+**It was removed** (ml-b82) because it was the only inference path that broke
+parity with the upstream Immich ML server.
 
-- CLIP/SigLIP architectures with no native MLX mapping (e.g.
-  `ViT-B-16-SigLIP__webli`, or any `arch__pretrained` name).
-- Recovery when an MLX/mlx-embeddings load fails (partial cache, version
-  mismatch) — the service degrades to open_clip instead of failing the request.
+The reason is preprocessing. Upstream Immich's `OpenClipVisualEncoder.transform`
+hardcodes resize-shortest-side + center-crop for *every* CLIP model — it ignores
+open_clip's `resize_mode`. open_clip's own bundled transform, by contrast,
+**squashes** SigLIP inputs to a square. So an open_clip fallback embedding for
+`ViT-SO400M-16-SigLIP2-384__webli` lands at only ~0.83 cosine vs the existing
+smart-search index, and indexing anything through it silently poisons the index
+— with only a log line as signal. "Degrade to a wrong-but-working backend" is
+worse than failing, because the damage is invisible until search quality drops.
 
-It is intentionally a fallback, not the primary path: it pulls in `torch` +
-`open-clip-torch`, and for `ViT-SO400M-16-SigLIP2-384__webli` it is **not**
-parity-guaranteed (open_clip's own preprocessing differs from the Immich-faithful
-path above), so a fallback embedding for that model may not match the existing
-index. Prefer the native backend for the default model. Fully dropping open_clip
-would slim the install but remove support for the non-MLX models and the
-recovery path, so it is retained for now.
+So the policy now is parity-or-fail:
+
+- The native MLX SigLIP2 backend is upstream-faithful (it reuses Immich's exact
+  transform; see [Native SigLIP2 backend](#native-siglip2-backend)). A load
+  failure **raises** rather than falling back, so a partial cache / version drift
+  can't poison the index; `/health` then reports degraded.
+- OpenAI/LAION CLIP models are served by `mlx-clip`.
+- A model with no native/MLX backend (the `ViT-B-16-SigLIP*` variants) **raises a
+  clear "no MLX backend" error** instead of silently serving non-parity vectors.
+
+This also drops `open-clip-torch` (and `torchvision`/`timm`) from the install.
+`torch` itself is still pulled in by `mlx-clip`. The `scripts/embedding_parity.py`
+`openclip` diagnostic still exists as a regression witness; install `open-clip-torch`
+manually if you want to run it.
 
 **Face Models**:
 - `buffalo_s`

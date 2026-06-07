@@ -210,7 +210,7 @@ def embed_mlx(images: list[tuple[str, bytes]], queries: list[str]) -> tuple[np.n
 
     model = get_clip_model(IMMICH_MODEL)
     if not getattr(model, "_use_mlx_embeddings", False):
-        raise SystemExit("MLX SigLIP2 backend did not load (fell back to open_clip). Check that mlx-embeddings is installed and the model downloaded.")
+        raise SystemExit("MLX SigLIP2 backend did not load. Check that mlx-embeddings is installed and the model downloaded.")
     img = np.stack([model.encode_image(b) for _, b in images])
     txt = np.stack([model.encode_text(q) for q in queries])
     model.unload()
@@ -223,9 +223,20 @@ def embed_openclip(images: list[tuple[str, bytes]], queries: list[str], device: 
 
     NOT the index gate — the NAS does its own preprocessing at inference (see the
     ``immich`` reference). open_clip is only the source exported to ONNX.
+
+    open-clip-torch was dropped from requirements.txt in ml-b82 (the production
+    fallback was removed); this diagnostic backend is optional, so guide the user
+    to install it rather than crashing with a bare ImportError.
     """
-    import open_clip
-    import torch
+    try:
+        import open_clip
+        import torch
+    except ImportError as e:
+        raise SystemExit(
+            "The 'openclip' diagnostic needs open-clip-torch, which is no longer a "
+            "requirement (ml-b82). Install it to use this reference: "
+            "pip install open-clip-torch"
+        ) from e
 
     model, _, preprocess = open_clip.create_model_and_transforms(OPENCLIP_ARCH, pretrained=OPENCLIP_PRETRAINED)
     tokenizer = open_clip.get_tokenizer(OPENCLIP_ARCH)

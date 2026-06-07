@@ -174,84 +174,6 @@ def test_siglip2_text_zero_embedding_does_not_nan():
     assert np.all(emb == 0.0), "a zero raw output should stay zero, not become NaN"
 
 
-# --- Zero-embedding guard: open_clip fallback paths (ml-3bt) ------------------
-#
-# The non-default open_clip fallback (_encode_image_fallback /
-# _encode_text_fallback) had the identical hazard as the SigLIP2 paths above,
-# but via the torch tensor norm API rather than np.linalg.norm. A zero pooled
-# output normalized by its zero norm produces an all-NaN embedding that poisons
-# the smart-search index/query. _l2_normalize_torch must leave it untouched.
-
-
-def _bare_fallback(model):
-    """Build an open_clip-fallback MLXClip without loading real weights.
-
-    Mirrors the attributes _load_fallback sets (_use_fallback + a torch
-    processor/tokenizer/device). The fake processor/tokenizer just return throw-
-    away tensors — the fake model ignores its input and returns a fixed (1, D)
-    pooled output, exercising only the normalization in the run() closures.
-    """
-    import torch
-
-    clip = object.__new__(MLXClip)
-    clip.model_name = "ViT-B-16-SigLIP2__webli"
-    clip._model = model
-    clip._processor = lambda image: torch.zeros(3, 2, 2)
-    clip._tokenizer = lambda texts: torch.zeros(1, 4, dtype=torch.int64)
-    clip._device = torch.device("cpu")
-    clip._loaded = True
-    clip._inference_lock = threading.Lock()
-    clip._use_fallback = True
-    return clip
-
-
-class _FakeTorchModel:
-    """open_clip stand-in: encode_image/encode_text return a fixed (1, D) tensor."""
-
-    def __init__(self, raw):
-        import torch
-
-        self._raw = torch.tensor(np.asarray(raw, dtype=np.float32)).unsqueeze(0)
-
-    def encode_image(self, image_tensor):
-        return self._raw
-
-    def encode_text(self, tokens):
-        return self._raw
-
-
-def test_fallback_image_embedding_normalized():
-    pytest.importorskip("torch")
-    raw = np.arange(1, 9, dtype=np.float32)  # non-unit, non-uniform
-    clip = _bare_fallback(_FakeTorchModel(raw))
-
-    emb = clip._encode_image_fallback(Image.new("RGB", (8, 8)))
-
-    assert emb.dtype == np.float32
-    assert np.linalg.norm(emb) == pytest.approx(1.0, abs=1e-5)
-    assert np.allclose(emb, raw / np.linalg.norm(raw), atol=1e-6)
-
-
-def test_fallback_image_zero_embedding_does_not_nan():
-    pytest.importorskip("torch")
-    clip = _bare_fallback(_FakeTorchModel(np.zeros(8, dtype=np.float32)))
-
-    emb = clip._encode_image_fallback(Image.new("RGB", (8, 8)))
-
-    assert not np.isnan(emb).any(), "zero embedding must not normalize to NaN"
-    assert np.all(emb == 0.0), "a zero raw output should stay zero, not become NaN"
-
-
-def test_fallback_text_zero_embedding_does_not_nan():
-    pytest.importorskip("torch")
-    clip = _bare_fallback(_FakeTorchModel(np.zeros(8, dtype=np.float32)))
-
-    emb = clip._encode_text_fallback("a photo of a cat")
-
-    assert not np.isnan(emb).any(), "zero embedding must not normalize to NaN"
-    assert np.all(emb == 0.0), "a zero raw output should stay zero, not become NaN"
-
-
 # --- Name mapping invariants -------------------------------------------------
 
 
@@ -265,13 +187,15 @@ def test_mlx_embeddings_map_repos_have_patch_token():
         assert pat.search(repo), f"{name} -> {repo!r} lacks a patchNN-NNN token"
 
 
-# --- Native SigLIP2 load-failure guard (ml-7j8.11) ---------------------------
+# --- No open_clip fallback: parity-first load contract (ml-b82) --------------
 #
-# The open_clip fallback serves SigLIP-*squash* embeddings (~0.83 cosine vs the
-# existing index), so silently using it when the parity-verified native backend
-# fails to load would poison the smart-search index with only a log line as
-# signal. For the index-critical native model the load must fail LOUDLY by
-# default; an explicit opt-in env var trades correctness for availability.
+# The open_clip fallback was removed because its SigLIP *squash* preprocessing
+# (~0.83 cosine vs the Immich index) is the only path that violates parity. So a
+# native SigLIP2 load failure must propagate (nothing left to poison the index),
+# an explicitly-unsupported model must raise a clear error, and an unknown name
+# still resolves to the mlx_clip default (that path is unchanged).
+
+UNSUPPORTED_NAME = "ViT-B-16-SigLIP2__webli"  # mapped to None in MODEL_MAP
 
 
 def _bare_for_load(name=SIGLIP2_NAME):
@@ -281,64 +205,67 @@ def _bare_for_load(name=SIGLIP2_NAME):
     return clip
 
 
-def test_native_siglip2_load_failure_raises_by_default(monkeypatch):
-    monkeypatch.delenv("ML_SIGLIP2_ALLOW_OPENCLIP_FALLBACK", raising=False)
+def test_native_siglip2_load_failure_propagates(monkeypatch):
+    """A native backend load failure raises — there is no open_clip fallback to
+    silently serve index-incompatible squash embeddings."""
 
     def boom(self):
         raise RuntimeError("native backend exploded")
 
-    fell_back = []
     monkeypatch.setattr(MLXClip, "_load_siglip2_mlx", boom)
-    monkeypatch.setattr(MLXClip, "_load_fallback", lambda self: fell_back.append(True))
 
     clip = _bare_for_load()
-    with pytest.raises(RuntimeError) as ei:
+    with pytest.raises(RuntimeError, match="native backend exploded"):
         clip._load_model()
 
-    assert not fell_back, "must NOT silently fall back to open_clip for the index-critical model"
+
+def test_unsupported_model_raises_clear_error():
+    """A model whose only backend was open_clip (None in MODEL_MAP) must raise a
+    clear 'no MLX backend' error, not silently serve the wrong/default model."""
+    clip = _bare_for_load(UNSUPPORTED_NAME)
+    with pytest.raises(RuntimeError) as ei:
+        clip._load_model()
     msg = str(ei.value)
-    assert SIGLIP2_NAME in msg, "error must name the affected index-critical model"
-    assert "ML_SIGLIP2_ALLOW_OPENCLIP_FALLBACK" in msg, "error must point at the opt-in escape hatch"
-    # The original cause is chained for debuggability.
-    assert isinstance(ei.value.__cause__, RuntimeError)
+    assert UNSUPPORTED_NAME in msg, "error must name the unsupported model"
+    assert "no MLX backend" in msg
+    assert "open_clip" in msg, "error must explain why it is unsupported now"
+    # And it must be in the documented supported list helper, not silently dropped.
+    assert UNSUPPORTED_NAME not in clip_module._supported_model_names()
 
 
-@pytest.mark.parametrize("flag", ["1", "true", "YES", "on"])
-def test_native_siglip2_load_failure_opt_in_allows_fallback(monkeypatch, flag):
-    monkeypatch.setenv("ML_SIGLIP2_ALLOW_OPENCLIP_FALLBACK", flag)
-
-    def boom(self):
-        raise RuntimeError("native backend exploded")
-
-    fell_back = []
-    monkeypatch.setattr(MLXClip, "_load_siglip2_mlx", boom)
-    monkeypatch.setattr(MLXClip, "_load_fallback", lambda self: fell_back.append(True))
-
-    clip = _bare_for_load()
-    clip._load_model()  # must NOT raise
-
-    assert fell_back == [True], "explicit opt-in must permit the open_clip fallback"
+def test_open_clip_machinery_fully_removed():
+    """The open_clip fallback code is gone entirely (no dead attrs/helpers)."""
+    for attr in ("_load_fallback", "_encode_image_fallback", "_encode_text_fallback"):
+        assert not hasattr(MLXClip, attr), f"{attr} should have been removed"
+    for name in (
+        "OPENCLIP_MAP",
+        "resolve_fallback_arch",
+        "_allow_openclip_fallback",
+        "_l2_normalize_torch",
+    ):
+        assert not hasattr(clip_module, name), f"{name} should have been removed"
 
 
-def test_native_siglip2_successful_load_never_falls_back(monkeypatch):
-    """The happy path must not touch the fallback regardless of the env flag."""
-    monkeypatch.delenv("ML_SIGLIP2_ALLOW_OPENCLIP_FALLBACK", raising=False)
+def test_unknown_model_falls_back_to_mlx_default(monkeypatch):
+    """An unmapped name still resolves to the mlx_clip default (ViT-B-32); only
+    the open_clip fallback was removed, the mlx_clip path is unchanged."""
+    import mlx_clip as mlx_clip_module
 
-    loaded = []
-    fell_back = []
-    monkeypatch.setattr(MLXClip, "_load_siglip2_mlx", lambda self: loaded.append(True))
-    monkeypatch.setattr(MLXClip, "_load_fallback", lambda self: fell_back.append(True))
+    seen = {}
 
-    clip = _bare_for_load()
+    def fake_mlx_clip(repo_id):
+        seen["repo_id"] = repo_id
+        return object()
+
+    # _load_model does a local `from mlx_clip import mlx_clip`, which re-reads the
+    # attribute at call time, so patching the module attribute is picked up.
+    monkeypatch.setattr(mlx_clip_module, "mlx_clip", fake_mlx_clip)
+
+    clip = _bare_for_load("Totally-Unknown-Model")
     clip._load_model()
 
-    assert loaded == [True]
-    assert not fell_back
-
-
-def test_allow_openclip_fallback_default_off(monkeypatch):
-    monkeypatch.delenv("ML_SIGLIP2_ALLOW_OPENCLIP_FALLBACK", raising=False)
-    assert clip_module._allow_openclip_fallback() is False
+    assert seen["repo_id"] == clip_module.MODEL_MAP["default"]
+    assert clip._loaded is True
 
 
 # --- SigLIP2 tokenizer source resolution (ml-qax) ----------------------------

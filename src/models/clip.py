@@ -36,22 +36,8 @@ def _l2_normalize(embedding: np.ndarray) -> np.ndarray:
     return embedding / norm if norm > 0 else embedding
 
 
-def _l2_normalize_torch(embedding):
-    """Torch counterpart of :func:`_l2_normalize` for the open_clip fallbacks.
-
-    Same hazard: a zero pooled output has a zero norm, and dividing by it yields
-    an all-NaN embedding that silently poisons the smart-search index or query.
-    Leave a zero (sub-)vector unchanged instead. ``torch.where`` evaluates both
-    branches, so the NaN from the zero-norm division is still computed — but it
-    lands only in the discarded branch, never in the returned tensor.
-    """
-    import torch
-
-    norm = embedding.norm(dim=-1, keepdim=True)
-    return torch.where(norm > 0, embedding / norm, embedding)
-
-
-# Model name mapping: Immich name -> MLX repo (or None to use open_clip fallback)
+# Model name mapping: Immich name -> mlx_clip repo (or None = no MLX backend;
+# _load_model raises for those, since the open_clip fallback was removed in ml-b82)
 MODEL_MAP = {
     # OpenAI CLIP models -> MLX
     "ViT-B-32__openai": "mlx-community/clip-vit-base-patch32",
@@ -60,9 +46,12 @@ MODEL_MAP = {
     # LAION CLIP models -> MLX
     "ViT-B-32__laion2b-s34b-b79k": "mlx-community/clip-vit-base-patch32-laion2b",
     "ViT-B-32__laion2b_s34b_b79k": "mlx-community/clip-vit-base-patch32-laion2b",
-    # SigLIP / SigLIP2 models -> None here. SigLIP2 names handled natively via
-    # MLX_EMBEDDINGS_MAP below (checked first in _load_model); anything that
-    # stays None falls through to the open_clip fallback.
+    # SigLIP / SigLIP2 models. The SO400M SigLIP2 default is handled natively via
+    # MLX_EMBEDDINGS_MAP below (checked first in _load_model). The ViT-B-16 SigLIP
+    # variants map to None: open_clip was their only backend, and it was removed
+    # (ml-b82) because its squash preprocessing diverges from the Immich index, so
+    # a request for one now raises a clear "no MLX backend" error in _load_model
+    # rather than silently serving non-parity vectors.
     "ViT-B-16-SigLIP__webli": None,
     "ViT-B-16-SigLIP2__webli": None,
     "ViT-SO400M-16-SigLIP2-384__webli": None,
@@ -179,28 +168,6 @@ def _siglip2_hf_repo() -> str:
     return os.getenv("ML_SIGLIP2_HF_REPO", "mlx-community/siglip2-so400m-patch16-384").strip()
 
 
-def _allow_openclip_fallback() -> bool:
-    """Whether an index-critical native-SigLIP2 load failure may fall back to open_clip.
-
-    Default OFF (ml-7j8.11). The native mlx-embeddings SigLIP2 backend is the
-    parity-verified path whose embeddings align with the existing smart-search
-    index. The open_clip fallback uses SigLIP *squash* preprocessing
-    (resize-to-square) instead of Immich's resize-shortest+center-crop, so its
-    image embeddings sit at ~0.83 cosine vs the index — indexing anything through
-    it silently poisons the index with only a log line as signal, breaking the
-    project's drop-in / no-reindex guarantee. So a native load failure for a
-    model in ``MLX_EMBEDDINGS_MAP`` fails loudly by default; set
-    ``ML_SIGLIP2_ALLOW_OPENCLIP_FALLBACK=1`` to explicitly trade correctness for
-    availability and accept the degraded, index-incompatible embeddings.
-    """
-    return os.getenv("ML_SIGLIP2_ALLOW_OPENCLIP_FALLBACK", "0").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
-    )
-
-
 def _download_siglip2_repo(hf_repo: str, out: Path) -> bool:
     """Snapshot a pre-converted fp16 SigLIP2 repo into the local cache dir.
 
@@ -302,38 +269,13 @@ def _resolve_siglip2_tokenizer_json(path_or_repo: str) -> str:
     return hf_hub_download(path_or_repo, "tokenizer.json")
 
 
-# open_clip model name mappings for fallback
-OPENCLIP_MAP = {
-    "ViT-B-32__openai": ("ViT-B-32-quickgelu", "openai"),
-    "ViT-B-16__openai": ("ViT-B-16", "openai"),
-    "ViT-L-14__openai": ("ViT-L-14", "openai"),
-    "ViT-B-32__laion2b-s34b-b79k": ("ViT-B-32", "laion2b_s34b_b79k"),
-    "ViT-B-32__laion2b_s34b_b79k": ("ViT-B-32", "laion2b_s34b_b79k"),
-    "ViT-B-16-SigLIP__webli": ("ViT-B-16-SigLIP", "webli"),
-    "ViT-B-16-SigLIP2__webli": ("ViT-B-16-SigLIP2", "webli"),
-    "ViT-SO400M-16-SigLIP2-384__webli": ("ViT-SO400M-16-SigLIP2-384", "webli"),
-}
-
-
-def resolve_fallback_arch(model_name: str) -> tuple[str, str]:
-    """Resolve an Immich CLIP model name to an open_clip ``(arch, pretrained)``.
-
-    Resolution order:
-    1. Exact match in ``OPENCLIP_MAP``.
-    2. ``arch__pretrained`` split on the first ``__``. For the OpenAI weights,
-       open_clip expects the quickgelu variant, so ``-quickgelu`` is appended
-       unless the arch already carries it (or is a SigLIP arch, which has no
-       quickgelu variant).
-    3. Anything else falls back to ``ViT-B-32-quickgelu`` / ``openai``.
-    """
-    if model_name in OPENCLIP_MAP:
-        return OPENCLIP_MAP[model_name]
-    if "__" in model_name:
-        arch, pretrained = model_name.split("__", 1)
-        if pretrained == "openai" and "quickgelu" not in arch.lower() and "siglip" not in arch.lower():
-            arch = arch + "-quickgelu"
-        return arch, pretrained
-    return "ViT-B-32-quickgelu", "openai"
+def _supported_model_names() -> list[str]:
+    """CLIP model names this service can serve — native MLX SigLIP2 plus the
+    mlx_clip-backed OpenAI/LAION ports. There is no open_clip fallback (ml-b82),
+    so anything not listed here raises in ``_load_model``."""
+    return sorted(MLX_EMBEDDINGS_MAP) + sorted(
+        k for k, v in MODEL_MAP.items() if v is not None and k != "default"
+    )
 
 
 class MLXClip:
@@ -357,66 +299,46 @@ class MLXClip:
         self._load_model()
 
     def _load_model(self):
-        """Load the MLX CLIP model, or fallback to open_clip."""
-        # Native MLX SigLIP2 backend (mlx-embeddings) takes precedence for
-        # mapped names; on any failure fall back to open_clip.
+        """Load the native MLX backend for this model.
+
+        Parity with the upstream Immich ML server is the goal, so there is no
+        open_clip fallback (ml-b82): open_clip's bundled SigLIP transform squashes
+        (resize-to-square) instead of Immich's resize-shortest+center-crop and
+        would emit index-incompatible embeddings (~0.83 cosine). A model with no
+        MLX or native backend fails loudly here rather than silently serving
+        non-parity vectors.
+        """
+        # Native MLX SigLIP2 backend (mlx-embeddings) — the parity-faithful path
+        # for Immich's default model. A load failure raises (no fallback) so a
+        # partial cache / version drift can't silently poison the smart-search
+        # index; /health then reports degraded because no model loads.
         if self.model_name in MLX_EMBEDDINGS_MAP:
-            try:
-                self._load_siglip2_mlx()
-                return
-            except Exception as e:
-                logger.error(f"mlx-embeddings SigLIP2 load failed: {e}", exc_info=True)
-                if not _allow_openclip_fallback():
-                    # ml-7j8.11: the open_clip fallback serves SigLIP-squash
-                    # embeddings (~0.83 cosine vs the index), so silently using
-                    # it for this parity-verified model would poison the smart-
-                    # search index with only a log line as signal. Fail loudly
-                    # instead — /health then reports degraded because no model
-                    # loads, surfacing the failure rather than hiding it.
-                    raise RuntimeError(
-                        f"Native SigLIP2 backend failed to load for index-critical model "
-                        f"'{self.model_name}'; refusing to silently serve open_clip embeddings. "
-                        f"open_clip uses SigLIP-squash preprocessing that is INCOMPATIBLE with the "
-                        f"existing smart-search index (~0.83 cosine), so indexing through it would "
-                        f"poison the index (see ml-7j8.11). Fix the native mlx-embeddings load, or set "
-                        f"ML_SIGLIP2_ALLOW_OPENCLIP_FALLBACK=1 to explicitly accept degraded, "
-                        f"index-incompatible embeddings."
-                    ) from e
-                logger.warning(
-                    "ML_SIGLIP2_ALLOW_OPENCLIP_FALLBACK is set: falling back to open_clip for "
-                    f"'{self.model_name}'. Embeddings will use SigLIP-squash preprocessing and are "
-                    "INCOMPATIBLE with the existing smart-search index (~0.83 cosine vs native); "
-                    "re-index smart search if you index anything while in this mode."
-                )
-                self._load_fallback()
-                return
-
-        self._repo_id = MODEL_MAP.get(self.model_name)
-
-        if self._repo_id is None and self.model_name not in OPENCLIP_MAP:
-            logger.warning(f"Unknown model '{self.model_name}', using MLX default (ViT-B-32)")
-            self._repo_id = MODEL_MAP["default"]
-
-        if self._repo_id is None:
-            logger.info(f"No MLX version for {self.model_name}, using open_clip fallback")
-            self._load_fallback()
+            self._load_siglip2_mlx()
             return
 
-        try:
-            from mlx_clip import mlx_clip
+        if self.model_name in MODEL_MAP:
+            self._repo_id = MODEL_MAP[self.model_name]
+            if self._repo_id is None:
+                # An explicitly-listed model whose only backend was open_clip
+                # (the SigLIP v1/v2 ViT-B-16 variants). open_clip was removed, so
+                # there is nothing parity-faithful to serve — fail clearly rather
+                # than silently substituting the wrong (default) model.
+                raise RuntimeError(
+                    f"CLIP model '{self.model_name}' has no MLX backend. The open_clip "
+                    f"fallback was removed because its SigLIP preprocessing diverges from "
+                    f"the Immich index (ml-b82); only models with a native MLX or mlx_clip "
+                    f"port are served. Supported: {_supported_model_names()}."
+                )
+        else:
+            logger.warning(f"Unknown CLIP model '{self.model_name}', using MLX default (ViT-B-32)")
+            self._repo_id = MODEL_MAP["default"]
 
-            logger.info(f"Loading MLX CLIP model: {self.model_name} -> {self._repo_id}")
-            self._model = mlx_clip(self._repo_id)
-            self._loaded = True
-            logger.info(f"Successfully loaded CLIP model via MLX: {self.model_name}")
+        from mlx_clip import mlx_clip
 
-        except ImportError:
-            logger.warning("mlx_clip not available, falling back to open_clip with MPS")
-            self._load_fallback()
-        except Exception as e:
-            logger.error(f"MLX model loading failed: {e}", exc_info=True)
-            logger.info("Falling back to open_clip")
-            self._load_fallback()
+        logger.info(f"Loading MLX CLIP model: {self.model_name} -> {self._repo_id}")
+        self._model = mlx_clip(self._repo_id)
+        self._loaded = True
+        logger.info(f"Successfully loaded CLIP model via MLX: {self.model_name}")
 
     def _load_siglip2_mlx(self):
         """Load a SigLIP2 model natively via mlx-embeddings.
@@ -459,47 +381,6 @@ class MLXClip:
         self._use_mlx_embeddings = True
         self._loaded = True
         logger.info(f"Successfully loaded SigLIP2 via mlx-embeddings: {self.model_name}")
-
-    def _load_fallback(self):
-        """Fallback to open_clip with MPS acceleration."""
-        try:
-            import open_clip
-            import torch
-        except ImportError as e:
-            logger.error(f"open_clip not available and MLX failed: {e}")
-            raise RuntimeError("Neither mlx_clip nor open_clip available. Install one with: pip install open-clip-torch") from e
-
-        arch, pretrained = resolve_fallback_arch(self.model_name)
-
-        logger.info(f"Loading open_clip model: {arch} / {pretrained}")
-
-        try:
-            model, _, preprocess = open_clip.create_model_and_transforms(arch, pretrained=pretrained)
-            tokenizer = open_clip.get_tokenizer(arch)
-        except Exception as e:
-            logger.warning(f"Failed to load {arch}/{pretrained}: {e}")
-            logger.info("Falling back to ViT-B-32-quickgelu/openai")
-            arch, pretrained = "ViT-B-32-quickgelu", "openai"
-            model, _, preprocess = open_clip.create_model_and_transforms(arch, pretrained=pretrained)
-            tokenizer = open_clip.get_tokenizer(arch)
-
-        if torch.backends.mps.is_available():
-            self._device = torch.device("mps")
-            model = model.to(self._device)
-            logger.info("Using MPS (Metal) acceleration")
-        else:
-            self._device = torch.device("cpu")
-            logger.warning("MPS not available, using CPU")
-
-        model.eval()
-
-        self._model = model
-        self._processor = preprocess
-        self._tokenizer = tokenizer
-        self._use_fallback = True
-        self._loaded = True
-
-        logger.info(f"Successfully loaded CLIP model via open_clip: {arch}/{pretrained}")
 
     def _infer_with_swap_retry(self, label: str, prepare, run):
         """Shared scaffolding for every encode path.
@@ -556,9 +437,6 @@ class MLXClip:
         if getattr(self, "_use_mlx_embeddings", False):
             return self._encode_image_siglip2(image)
 
-        if hasattr(self, "_use_fallback") and self._use_fallback:
-            return self._encode_image_fallback(image)
-
         # MLX path — preprocess the PIL image directly (no temp file needed).
         def prepare(model_ref):
             return model_ref.img_processor([image])
@@ -576,31 +454,6 @@ class MLXClip:
         embedding = self._infer_with_swap_retry("preprocessing", prepare, run)
         embedding = _l2_normalize(embedding)
         return embedding.flatten().astype(np.float32)
-
-    def _encode_image_fallback(self, image: Image.Image) -> np.ndarray:
-        """Encode image using open_clip fallback.
-
-        Preprocessing (resize/normalize) runs outside the lock since it's
-        CPU-only. Only the MPS/GPU inference is serialized. Model reference
-        is captured before preprocessing and verified after lock acquisition.
-        One retry on model swap, same as encode_image.
-        """
-        import torch
-
-        def prepare(model_ref):
-            assert self._processor is not None
-            return self._processor(image).unsqueeze(0).to(self._device)
-
-        def run(model_ref, image_tensor):
-            with torch.no_grad():
-                embedding = model_ref.encode_image(image_tensor)
-                return _l2_normalize_torch(embedding)
-
-        embedding = self._infer_with_swap_retry("preprocessing (fallback)", prepare, run)
-        # .cpu() triggers MPS device sync — safe outside the lock because MPS
-        # uses its own command queue (unlike MLX which shares the Metal command
-        # buffer with Vision framework).
-        return embedding.squeeze().cpu().numpy().astype(np.float32)
 
     def _encode_image_siglip2(self, image: Image.Image) -> np.ndarray:
         """Encode image via the native MLX SigLIP2 backend (mlx-embeddings).
@@ -640,9 +493,6 @@ class MLXClip:
         if getattr(self, "_use_mlx_embeddings", False):
             return self._encode_text_siglip2(text)
 
-        if hasattr(self, "_use_fallback") and self._use_fallback:
-            return self._encode_text_fallback(text)
-
         with self._inference_lock:
             model_ref = self._model
             if model_ref is None:
@@ -652,27 +502,6 @@ class MLXClip:
                 embedding = np.array(embedding)
             embedding = _l2_normalize(embedding)
             return embedding.flatten().astype(np.float32)
-
-    def _encode_text_fallback(self, text: str) -> np.ndarray:
-        """Encode text using open_clip fallback.
-
-        Tokenization runs outside the lock since it's CPU-only.
-        Only the MPS/GPU inference is serialized, matching _encode_image_fallback.
-        One retry on model swap, same as encode_image paths.
-        """
-        import torch
-
-        def prepare(model_ref):
-            assert self._tokenizer is not None
-            return self._tokenizer([text]).to(self._device)
-
-        def run(model_ref, tokens):
-            with torch.no_grad():
-                embedding = model_ref.encode_text(tokens)
-                return _l2_normalize_torch(embedding)
-
-        embedding = self._infer_with_swap_retry("tokenization (text fallback)", prepare, run)
-        return embedding.squeeze().cpu().numpy().astype(np.float32)
 
     def _encode_text_siglip2(self, text: str) -> np.ndarray:
         """Encode text via the native MLX SigLIP2 backend (mlx-embeddings).
@@ -769,8 +598,7 @@ if __name__ == "__main__":
     import sys
 
     logger.info("Testing CLIP model loading...")
-    logger.info(f"Supported MLX models: {[k for k, v in MODEL_MAP.items() if v is not None and k != 'default']}")
-    logger.info(f"Supported open_clip models: {list(OPENCLIP_MAP.keys())}")
+    logger.info(f"Supported models (native MLX + mlx_clip, no open_clip): {_supported_model_names()}")
 
     logger.info("\n--- Testing MLX model ---")
     clip = get_clip_model("ViT-B-32__openai")

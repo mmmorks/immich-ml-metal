@@ -23,16 +23,20 @@ huggingface-hub>=0.20.0
 mlx-clip @ git+https://github.com/harperreed/mlx_clip.git@f56e3ecc72c74c68b6b50eb6f50c3f22fc23fe2c
 
 # Native MLX SigLIP2 backend (Blaizzy/mlx-embeddings). Drives the
-# ViT-SO400M-16-SigLIP2-384__webli smart-search model on-device via MLX
-# instead of the open_clip/MPS fallback. Pinned: the loader's patch-size
-# regex and the get_image_features/get_text_features API are version-specific
-# (see ml-ycd.1 spike). Pulls in mlx-vlm + transformers.
+# ViT-SO400M-16-SigLIP2-384__webli smart-search model on-device via MLX.
+# Pinned: the loader's patch-size regex and the get_image_features/
+# get_text_features API are version-specific (see ml-ycd.1 spike).
+# Pulls in mlx-vlm + transformers.
 mlx-embeddings==0.1.0
 
-# open_clip fallback for models without an MLX port (SigLIP v1 maps to None in
-# clip.py MODEL_MAP, and SigLIP2 falls back here if the mlx-embeddings load
-# fails). Runs on MPS, not MLX-accelerated. Pulls in torch/torchvision/timm.
-open-clip-torch>=2.24.0
+# NOTE: the open_clip/MPS fallback was removed in ml-b82. open_clip's bundled
+# SigLIP transform squashes (resize-to-square) instead of Immich's resize-
+# shortest+center-crop, so it produced index-incompatible embeddings (~0.83
+# cosine) — the one path that broke parity with the upstream Immich ML server.
+# Models are served only by the native MLX SigLIP2 backend above or mlx-clip;
+# any other model raises in clip.py:_load_model. (torch is still pulled in by
+# mlx-clip.) The scripts/embedding_parity.py 'openclip' diagnostic optionally
+# wants open-clip-torch; install it manually if you need that reference.
 
 # Face recognition - official onnxruntime supports Apple Silicon via CoreML
 # onnxruntime 1.18+ supports numpy 2.x
