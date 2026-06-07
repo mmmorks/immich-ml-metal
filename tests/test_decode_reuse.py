@@ -31,7 +31,7 @@ def _no_open(mod, monkeypatch):
     monkeypatch.setattr(mod.Image, "open", _boom)
 
 
-def test_detect_faces_skips_open_when_dimensions_provided(monkeypatch):
+def test_detect_faces_skips_open_when_dimensions_provided(requires_vision_faces, monkeypatch):
     _no_open(face_detect, monkeypatch)
 
     faces, w, h = face_detect.detect_faces(_blank_image_bytes(), img_width=200, img_height=80)
@@ -48,7 +48,7 @@ def test_recognize_text_skips_open_when_dimensions_provided(monkeypatch):
     assert result == {"text": [], "box": [], "boxScore": [], "textScore": []}
 
 
-def test_detect_faces_still_opens_when_dimensions_absent():
+def test_detect_faces_still_opens_when_dimensions_absent(requires_vision_faces):
     """Standalone callers that pass no dimensions keep working (open for size)."""
     faces, w, h = face_detect.detect_faces(_blank_image_bytes())
     assert faces == []
