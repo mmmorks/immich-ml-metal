@@ -173,6 +173,84 @@ def test_siglip2_text_zero_embedding_does_not_nan():
     assert np.all(emb == 0.0), "a zero raw output should stay zero, not become NaN"
 
 
+# --- Zero-embedding guard: open_clip fallback paths (ml-3bt) ------------------
+#
+# The non-default open_clip fallback (_encode_image_fallback /
+# _encode_text_fallback) had the identical hazard as the SigLIP2 paths above,
+# but via the torch tensor norm API rather than np.linalg.norm. A zero pooled
+# output normalized by its zero norm produces an all-NaN embedding that poisons
+# the smart-search index/query. _l2_normalize_torch must leave it untouched.
+
+
+def _bare_fallback(model):
+    """Build an open_clip-fallback MLXClip without loading real weights.
+
+    Mirrors the attributes _load_fallback sets (_use_fallback + a torch
+    processor/tokenizer/device). The fake processor/tokenizer just return throw-
+    away tensors — the fake model ignores its input and returns a fixed (1, D)
+    pooled output, exercising only the normalization in the run() closures.
+    """
+    import torch
+
+    clip = object.__new__(MLXClip)
+    clip.model_name = "ViT-B-16-SigLIP2__webli"
+    clip._model = model
+    clip._processor = lambda image: torch.zeros(3, 2, 2)
+    clip._tokenizer = lambda texts: torch.zeros(1, 4, dtype=torch.int64)
+    clip._device = torch.device("cpu")
+    clip._loaded = True
+    clip._inference_lock = threading.Lock()
+    clip._use_fallback = True
+    return clip
+
+
+class _FakeTorchModel:
+    """open_clip stand-in: encode_image/encode_text return a fixed (1, D) tensor."""
+
+    def __init__(self, raw):
+        import torch
+
+        self._raw = torch.tensor(np.asarray(raw, dtype=np.float32)).unsqueeze(0)
+
+    def encode_image(self, image_tensor):
+        return self._raw
+
+    def encode_text(self, tokens):
+        return self._raw
+
+
+def test_fallback_image_embedding_normalized():
+    pytest.importorskip("torch")
+    raw = np.arange(1, 9, dtype=np.float32)  # non-unit, non-uniform
+    clip = _bare_fallback(_FakeTorchModel(raw))
+
+    emb = clip._encode_image_fallback(Image.new("RGB", (8, 8)))
+
+    assert emb.dtype == np.float32
+    assert np.linalg.norm(emb) == pytest.approx(1.0, abs=1e-5)
+    assert np.allclose(emb, raw / np.linalg.norm(raw), atol=1e-6)
+
+
+def test_fallback_image_zero_embedding_does_not_nan():
+    pytest.importorskip("torch")
+    clip = _bare_fallback(_FakeTorchModel(np.zeros(8, dtype=np.float32)))
+
+    emb = clip._encode_image_fallback(Image.new("RGB", (8, 8)))
+
+    assert not np.isnan(emb).any(), "zero embedding must not normalize to NaN"
+    assert np.all(emb == 0.0), "a zero raw output should stay zero, not become NaN"
+
+
+def test_fallback_text_zero_embedding_does_not_nan():
+    pytest.importorskip("torch")
+    clip = _bare_fallback(_FakeTorchModel(np.zeros(8, dtype=np.float32)))
+
+    emb = clip._encode_text_fallback("a photo of a cat")
+
+    assert not np.isnan(emb).any(), "zero embedding must not normalize to NaN"
+    assert np.all(emb == 0.0), "a zero raw output should stay zero, not become NaN"
+
+
 # --- Name mapping invariants -------------------------------------------------
 
 

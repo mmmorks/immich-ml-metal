@@ -34,6 +34,21 @@ def _l2_normalize(embedding: np.ndarray) -> np.ndarray:
     return embedding / norm if norm > 0 else embedding
 
 
+def _l2_normalize_torch(embedding):
+    """Torch counterpart of :func:`_l2_normalize` for the open_clip fallbacks.
+
+    Same hazard: a zero pooled output has a zero norm, and dividing by it yields
+    an all-NaN embedding that silently poisons the smart-search index or query.
+    Leave a zero (sub-)vector unchanged instead. ``torch.where`` evaluates both
+    branches, so the NaN from the zero-norm division is still computed — but it
+    lands only in the discarded branch, never in the returned tensor.
+    """
+    import torch
+
+    norm = embedding.norm(dim=-1, keepdim=True)
+    return torch.where(norm > 0, embedding / norm, embedding)
+
+
 # Model name mapping: Immich name -> MLX repo (or None to use open_clip fallback)
 MODEL_MAP = {
     # OpenAI CLIP models -> MLX
@@ -562,7 +577,7 @@ class MLXClip:
         def run(model_ref, image_tensor):
             with torch.no_grad():
                 embedding = model_ref.encode_image(image_tensor)
-                return embedding / embedding.norm(dim=-1, keepdim=True)
+                return _l2_normalize_torch(embedding)
 
         embedding = self._infer_with_swap_retry(
             "preprocessing (fallback)", prepare, run
@@ -641,7 +656,7 @@ class MLXClip:
         def run(model_ref, tokens):
             with torch.no_grad():
                 embedding = model_ref.encode_text(tokens)
-                return embedding / embedding.norm(dim=-1, keepdim=True)
+                return _l2_normalize_torch(embedding)
 
         embedding = self._infer_with_swap_retry(
             "tokenization (text fallback)", prepare, run
