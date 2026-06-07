@@ -26,10 +26,14 @@ huggingface-hub>=0.20.0
 # vendored backend matches the index by running gelu (see clip_mlx.py).
 # The vendored BPE tokenizer needs `regex` directly (not just transitively).
 regex>=2024.0.0
-# torch is needed ONLY for the one-time HF->MLX weight conversion of the OpenAI
-# CLIP ports (the source pytorch_model.bin is a torch pickle); serving the cached
-# weights needs only mlx. The default SigLIP2 path does not use it.
-torch>=2.2.0
+# torch is an OPTIONAL, convert-only dependency and is intentionally NOT installed
+# by default — it's large, and the default SigLIP2 smart-search path never needs
+# it. torch is required ONLY for the one-time HF->MLX weight conversion of the
+# OpenAI CLIP ports (ViT-B-32/B-16/L-14 __openai; the source pytorch_model.bin is
+# a torch pickle); serving already-converted weights needs only mlx. Requesting an
+# OpenAI CLIP model on a fresh, torch-free install raises an actionable error (not
+# a bare ImportError) from clip_mlx.convert_weights telling you to install it:
+#   pip install torch>=2.2.0
 
 # Native MLX SigLIP2 backend (Blaizzy/mlx-embeddings). Drives the
 # ViT-SO400M-16-SigLIP2-384__webli smart-search model on-device via MLX.

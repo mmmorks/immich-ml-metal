@@ -536,17 +536,41 @@ class CLIPTokenizer:
 # --------------------------------------------------------------------------- #
 # One-time HF -> MLX weight conversion
 # --------------------------------------------------------------------------- #
+def _require_torch():
+    """Import torch, raising an actionable error if it isn't installed.
+
+    torch is an OPTIONAL, convert-only dependency — it is NOT in requirements.txt,
+    to keep the default install slim. It is needed solely to read the source
+    ``pytorch_model.bin`` pickle when first converting an OpenAI CLIP port to MLX
+    weights. The default SigLIP2 smart-search path never needs it, and serving
+    already-converted weights needs only mlx. Surface a clear instruction instead
+    of a bare ImportError so a default (torch-free) install that requests an
+    OpenAI CLIP model knows exactly what to do.
+    """
+    try:
+        import torch
+    except ImportError as e:
+        raise RuntimeError(
+            "PyTorch is required to convert OpenAI CLIP weights to MLX on first use, "
+            "but it is not installed. torch is an optional, convert-only dependency "
+            "(not in requirements.txt). Install it with `pip install torch>=2.2.0`, "
+            "or use the default SigLIP2 smart-search model, which needs no torch."
+        ) from e
+    return torch
+
+
 def convert_weights(hf_repo: str, mlx_path: str, dtype: str = "float32") -> None:
     """Download an OpenAI CLIP checkpoint from HF and convert it to MLX weights.
 
     Needed only on first load of a given model (the converted weights are then
-    cached and reloaded). torch is imported lazily here — it is required ONLY for
-    this one-time conversion (the source ``pytorch_model.bin`` is a torch
-    pickle); serving the cached weights needs only mlx.
+    cached and reloaded). torch is imported lazily here via ``_require_torch`` —
+    it is required ONLY for this one-time conversion (the source
+    ``pytorch_model.bin`` is a torch pickle); serving the cached weights needs
+    only mlx.
     """
     import shutil
 
-    import torch
+    torch = _require_torch()
     from huggingface_hub import snapshot_download
 
     out = Path(mlx_path)

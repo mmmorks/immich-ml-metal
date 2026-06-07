@@ -91,3 +91,26 @@ def test_config_defaults_to_quick_gelu():
         layer_norm_eps=1e-5,
     )
     assert cfg.hidden_act == "quick_gelu"
+
+
+def test_require_torch_returns_module_when_installed():
+    """When torch is importable, ``_require_torch`` returns the module so the
+    converter can use it."""
+    torch = pytest.importorskip("torch")
+    from src.models.clip_mlx import _require_torch
+
+    assert _require_torch() is torch
+
+
+def test_require_torch_raises_actionable_error_when_missing(monkeypatch):
+    """A torch-free install (the default — torch is convert-only and not in
+    requirements.txt) must get an actionable RuntimeError, not a bare ImportError,
+    when an OpenAI CLIP model triggers a first-use conversion. Setting
+    ``sys.modules['torch'] = None`` makes ``import torch`` raise ImportError."""
+    import sys
+
+    from src.models.clip_mlx import _require_torch
+
+    monkeypatch.setitem(sys.modules, "torch", None)
+    with pytest.raises(RuntimeError, match=r"pip install torch"):
+        _require_torch()

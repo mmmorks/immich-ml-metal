@@ -162,6 +162,11 @@ Configure via environment variables or edit `src/config.py`:
   - `ViT-B-32__openai` -> `openai/clip-vit-base-patch32`
   - `ViT-B-16__openai`-> `openai/clip-vit-base-patch16`
   - `ViT-L-14__openai`-> `openai/clip-vit-large-patch14`
+  - **Needs `pip install torch` for the first-use conversion only.** torch is an
+    optional, convert-only dependency (not in `requirements.txt`) — it reads the
+    source PyTorch checkpoint pickle. Serving the cached MLX weights afterward, and
+    the default SigLIP2 path, need no torch. Requesting an OpenAI port on a fresh,
+    torch-free install raises an actionable error pointing you here.
 
 - LAION CLIP models -> **unsupported** (not yet wired; raises a clear error)
   - `ViT-B-32__laion2b-s34b-b79k`
