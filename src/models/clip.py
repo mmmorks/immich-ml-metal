@@ -15,6 +15,8 @@ import gc
 import logging
 import threading
 
+from src.models.immich_preprocess import siglip_image_pixels
+
 logger = logging.getLogger(__name__)
 
 # Model name mapping: Immich name -> MLX repo (or None to use open_clip fallback)
@@ -172,6 +174,23 @@ class MLXClip:
         )
         self._model, self._processor = load(path_or_repo)
         self._repo_id = path_or_repo
+
+        # Immich-faithful text tokenizer (ml-ycd.4): the standard Immich server
+        # applies clean_text (canonicalize) then a raw tokenizer.json. HF
+        # SiglipProcessor skips canonicalization and diverges on caps/punctuation,
+        # so we tokenize exactly like the server to keep query embeddings aligned
+        # with the existing index. tokenizer.json ships with the converted dir
+        # (override) or the HF repo snapshot.
+        from src.models.immich_preprocess import SiglipTextTokenizer
+
+        if override and os.path.isdir(override):
+            tokenizer_json = os.path.join(override, "tokenizer.json")
+        else:
+            from huggingface_hub import hf_hub_download
+
+            tokenizer_json = hf_hub_download(repo, "tokenizer.json")
+        self._siglip_tokenizer = SiglipTextTokenizer(tokenizer_json)
+
         self._use_mlx_embeddings = True
         self._loaded = True
         logger.info(
@@ -339,20 +358,22 @@ class MLXClip:
     def _encode_image_siglip2(self, image: Image.Image) -> np.ndarray:
         """Encode image via the native MLX SigLIP2 backend (mlx-embeddings).
 
-        Preprocessing (FixRes 384 resize/normalize via the SiglipProcessor)
-        runs outside the lock; only Metal inference is serialized. Model
-        reference is captured before preprocessing and verified after lock
-        acquisition, with one retry on a concurrent model swap — mirroring
-        encode_image. get_image_features returns an un-normalized (1, 1152)
-        pooled output, so we L2-normalize manually.
+        Preprocessing replicates the standard Immich ML server exactly —
+        resize-shortest-side to 384 + center-crop + normalize 0.5 (see
+        src.models.immich_preprocess.siglip_image_pixels), NOT HF
+        SiglipProcessor, which squashes to 384x384 and would diverge from the
+        existing index on non-square photos. Preprocessing is model-independent
+        and runs outside the lock; only Metal inference is serialized, with one
+        retry on a concurrent model swap. get_image_features returns an
+        un-normalized (1, 1152) pooled output, so we L2-normalize manually.
         """
+        # Immich-faithful preprocessing is model-independent; run() does only
+        # the lazy Metal inference inside the lock.
         def prepare(model_ref):
-            return self._processor(images=[image], return_tensors="mlx")
+            return mx.array(siglip_image_pixels(image))
 
-        def run(model_ref, inputs):
-            features = model_ref.get_image_features(
-                pixel_values=inputs["pixel_values"]
-            )
+        def run(model_ref, pixel_values):
+            features = model_ref.get_image_features(pixel_values=pixel_values)
             # Force Metal evaluation inside the lock — MLX arrays are lazy.
             return np.array(features[0])
 
@@ -413,23 +434,22 @@ class MLXClip:
     def _encode_text_siglip2(self, text: str) -> np.ndarray:
         """Encode text via the native MLX SigLIP2 backend (mlx-embeddings).
 
-        Tokenization (FixRes: pad to max_length 64, the SigLIP canonical text
-        length) runs outside the lock; only Metal inference is serialized.
-        Model-ref capture + one retry on a concurrent swap, matching the other
-        encode paths. get_text_features returns an un-normalized (1, 1152)
-        pooled output, so we L2-normalize manually.
+        Tokenization replicates the standard Immich ML server exactly —
+        clean_text (canonicalize) then a raw tokenizer.json padded/truncated to
+        64 (see src.models.immich_preprocess.SiglipTextTokenizer). HF
+        SiglipProcessor skips canonicalization and diverges on caps/punctuation,
+        so this keeps query embeddings aligned with the index. Tokenization is
+        model-independent and runs outside the lock; only Metal inference is
+        serialized, with one retry on a concurrent swap. get_text_features
+        returns an un-normalized (1, 1152) pooled output, so we L2-normalize.
         """
+        # Immich-faithful tokenization is model-independent; run() does only
+        # the lazy Metal inference inside the lock.
         def prepare(model_ref):
-            return self._processor(
-                text=[text],
-                return_tensors="mlx",
-                padding="max_length",
-                max_length=64,
-                truncation=True,
-            )
+            return mx.array(self._siglip_tokenizer(text))
 
-        def run(model_ref, inputs):
-            features = model_ref.get_text_features(input_ids=inputs["input_ids"])
+        def run(model_ref, input_ids):
+            features = model_ref.get_text_features(input_ids=input_ids)
             # Force Metal evaluation inside the lock — MLX arrays are lazy.
             return np.array(features[0])
 
@@ -445,6 +465,7 @@ class MLXClip:
         self._model = None
         self._processor = None
         self._tokenizer = None
+        self._siglip_tokenizer = None
         self._loaded = False
         self._use_mlx_embeddings = False
 

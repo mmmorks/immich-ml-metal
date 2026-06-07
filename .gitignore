@@ -8,6 +8,7 @@ venv/
 .venv/
 
 # Downloaded model weights / runtime caches
-mlx-community/
-models/
-cache/
+# Anchored to the repo root so src/models/ (source code) is NOT ignored.
+/mlx-community/
+/models/
+/cache/
