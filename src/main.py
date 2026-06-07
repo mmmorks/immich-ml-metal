@@ -539,7 +539,7 @@ async def _process_predict(
                 finally:
                     _track_model_use("clip")
 
-            return ("clip", str(embedding.tolist()))
+            return ("clip", json.dumps(embedding.tolist()))
 
         elif "textual" in task_config and text:
             model_name = task_config["textual"].get("modelName", settings.clip_model)
@@ -554,7 +554,7 @@ async def _process_predict(
                 finally:
                     _track_model_use("clip")
 
-            return ("clip", str(embedding.tolist()))
+            return ("clip", json.dumps(embedding.tolist()))
 
         return None
 
