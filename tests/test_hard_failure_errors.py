@@ -87,9 +87,12 @@ def test_face_detect_raises_on_undecodable_image():
         face_detect.detect_faces(b"this is not an image")
 
 
-def test_face_detect_returns_empty_for_face_free_image():
+def test_face_detect_returns_empty_for_face_free_image(requires_vision_faces):
     """A genuinely face-free image still returns a structurally-empty result
-    without raising — the empty case stays distinguishable from a failure."""
+    without raising — the empty case stays distinguishable from a failure.
+
+    Exercises the real Vision face path, so it skips where that path is
+    unavailable (e.g. a headless CI runner); see requires_vision_faces."""
     import src.models.face_detect as face_detect
 
     faces, w, h = face_detect.detect_faces(_blank_image_bytes())
