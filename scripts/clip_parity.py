@@ -100,9 +100,15 @@ DEFAULT_MODEL = "ViT-B-32__openai"
 # resolve_fallback_arch that ml-b82 removed, so the gate keeps a self-contained
 # reference (its open_clip use is dev-only, not a production dependency).
 _OPENCLIP_REF = {
+    # OpenAI checkpoints REQUIRE the quickgelu variant — OpenAI CLIP trained with
+    # quick_gelu, and mlx_clip hardcodes it too. Loading the plain (standard-gelu)
+    # arch builds a wrong-activation reference: open_clip even warns "QuickGELU
+    # mismatch", and the gate then false-FAILs a correct mlx_clip at ~0.985 (the
+    # quickgelu-vs-gelu gap) instead of ~1.0 (ml-7j8.17). All three OpenAI ports
+    # must carry -quickgelu, not just B-32.
     "ViT-B-32__openai": ("ViT-B-32-quickgelu", "openai"),
-    "ViT-B-16__openai": ("ViT-B-16", "openai"),
-    "ViT-L-14__openai": ("ViT-L-14", "openai"),
+    "ViT-B-16__openai": ("ViT-B-16-quickgelu", "openai"),
+    "ViT-L-14__openai": ("ViT-L-14-quickgelu", "openai"),
     "ViT-B-32__laion2b-s34b-b79k": ("ViT-B-32", "laion2b_s34b_b79k"),
     "ViT-B-32__laion2b_s34b_b79k": ("ViT-B-32", "laion2b_s34b_b79k"),
 }

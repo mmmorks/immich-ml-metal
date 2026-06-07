@@ -332,8 +332,9 @@ def test_unsupported_model_raises_clear_error():
         clip._load_model()
     msg = str(ei.value)
     assert UNSUPPORTED_NAME in msg, "error must name the unsupported model"
-    assert "no MLX backend" in msg
-    # It must not appear in the supported-list helper either.
+    assert "MLX backend" in msg
+    assert "open_clip" in msg, "error must explain why it is unsupported now"
+    # And it must not appear in the documented supported-list helper.
     assert UNSUPPORTED_NAME not in clip_module._supported_model_names()
 
 
@@ -350,21 +351,30 @@ def test_no_fallback_machinery():
         assert not hasattr(clip_module, name), f"{name} must not exist"
 
 
-def test_unknown_model_raises_clear_error(monkeypatch):
-    """An unmapped name must raise a clear 'no MLX backend' error (ml-bu1), not
-    silently degrade to the mlx_clip default (ViT-B-32) — a wrong, index-incompatible
-    vector. Parity with the None-backend branch."""
+def _capture_mlx_clip(monkeypatch):
+    """Patch mlx_clip.mlx_clip and return a dict capturing its call args.
+
+    mlx_clip(model_dir, hf_repo): we assert on hf_repo (the checkpoint actually
+    converted), since the model_dir is just a local cache path.
+    """
     import mlx_clip as mlx_clip_module
 
-    # If the fix regressed and the unmapped name fell through to the mlx_clip load,
-    # this would record the repo and the raise assertion below would fail.
     seen = {}
 
-    def fake_mlx_clip(repo_id):
-        seen["repo_id"] = repo_id
+    def fake_mlx_clip(model_dir, hf_repo=None):
+        seen["model_dir"] = model_dir
+        seen["hf_repo"] = hf_repo
         return object()
 
     monkeypatch.setattr(mlx_clip_module, "mlx_clip", fake_mlx_clip)
+    return seen
+
+
+def test_unknown_model_raises_clear_error(monkeypatch):
+    """An unmapped name must raise a clear 'no MLX backend' error (ml-bu1), not
+    silently degrade to the mlx_clip default (ViT-B-32) — a wrong, index-incompatible
+    vector. Parity with the None-backend branch. mlx_clip must never be invoked."""
+    seen = _capture_mlx_clip(monkeypatch)
 
     unknown = "Totally-Unknown-Model"
     clip = _bare_for_load(unknown)
@@ -373,27 +383,73 @@ def test_unknown_model_raises_clear_error(monkeypatch):
     msg = str(ei.value)
     assert unknown in msg, "error must name the unknown model"
     assert "no MLX backend" in msg
-    assert "seen" not in seen and not seen, "must not have attempted the default mlx_clip load"
+    assert not seen, "must not have attempted the default mlx_clip load"
 
 
 def test_explicit_default_still_loads(monkeypatch):
     """MODEL_MAP['default'] stays reachable for internal/test use via an explicit
-    'default' request — only *unmapped* names raise (ml-bu1)."""
-    import mlx_clip as mlx_clip_module
-
-    seen = {}
-
-    def fake_mlx_clip(repo_id):
-        seen["repo_id"] = repo_id
-        return object()
-
-    monkeypatch.setattr(mlx_clip_module, "mlx_clip", fake_mlx_clip)
+    'default' request — only *unmapped* names raise (ml-bu1). The default
+    checkpoint reaches mlx_clip as hf_repo, not as the model_dir (ml-7j8.17)."""
+    seen = _capture_mlx_clip(monkeypatch)
 
     clip = _bare_for_load("default")
     clip._load_model()
 
-    assert seen["repo_id"] == clip_module.MODEL_MAP["default"]
+    assert seen["hf_repo"] == clip_module.MODEL_MAP["default"]
+    assert seen["model_dir"] != clip_module.MODEL_MAP["default"]
     assert clip._loaded is True
+
+
+# --- Wrong-weights regression guard (ml-7j8.17) ------------------------------
+#
+# mlx_clip(model_dir) treats model_dir as a LOCAL dir and, if absent, converts
+# its DEFAULT hf_repo (openai/clip-vit-base-patch32). The old code passed the
+# repo id positionally as model_dir with no hf_repo, so B-16/L-14/LAION all
+# silently served OpenAI B-32 weights. These tests pin the corrected routing.
+
+# OpenAI models mlx_clip can serve faithfully -> the CORRECT hf_repo is converted.
+WRONG_WEIGHTS_OPENAI = {
+    "ViT-B-16__openai": "openai/clip-vit-base-patch16",
+    "ViT-L-14__openai": "openai/clip-vit-large-patch14",
+}
+# LAION models mlx_clip CANNOT serve (it hardcodes quick_gelu) -> must fail loud.
+LAION_NAMES = ("ViT-B-32__laion2b-s34b-b79k", "ViT-B-32__laion2b_s34b_b79k")
+
+
+@pytest.mark.parametrize("name,expected_repo", WRONG_WEIGHTS_OPENAI.items())
+def test_openai_variants_convert_correct_weights(monkeypatch, name, expected_repo):
+    """OpenAI B-16/L-14 must convert their OWN checkpoint, never the default B-32.
+
+    Guards the ml-7j8.17 bug: the requested hf_repo must be the model-specific
+    OpenAI repo, and it must reach mlx_clip as hf_repo (not as the model_dir, the
+    arg that silently fell back to the default checkpoint)."""
+    seen = _capture_mlx_clip(monkeypatch)
+
+    clip = _bare_for_load(name)
+    clip._load_model()
+
+    assert seen["hf_repo"] == expected_repo, f"{name} must convert {expected_repo}"
+    assert seen["hf_repo"] != "openai/clip-vit-base-patch32" or name == "ViT-B-32__openai"
+    # The repo id must NOT be passed as the model_dir (the original bug shape).
+    assert seen["model_dir"] != expected_repo
+    assert clip._loaded is True
+
+
+@pytest.mark.parametrize("name", LAION_NAMES)
+def test_laion_variants_fail_loud(monkeypatch, name):
+    """LAION names must raise (no parity-faithful backend) rather than silently
+    serve OpenAI B-32 — mlx_clip must never be invoked for them."""
+    called = _capture_mlx_clip(monkeypatch)
+
+    clip = _bare_for_load(name)
+    with pytest.raises(RuntimeError) as ei:
+        clip._load_model()
+
+    msg = str(ei.value)
+    assert name in msg
+    assert "LAION" in msg or "gelu" in msg.lower(), "error should explain the LAION/gelu reason"
+    assert called == {}, "mlx_clip must not be called for a LAION model"
+    assert name not in clip_module._supported_model_names()
 
 
 # --- SigLIP2 tokenizer source resolution (ml-qax) ----------------------------

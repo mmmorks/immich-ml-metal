@@ -36,16 +36,33 @@ def _l2_normalize(embedding: np.ndarray) -> np.ndarray:
     return embedding / norm if norm > 0 else embedding
 
 
-# Model name mapping: Immich name -> mlx_clip repo (or None = no MLX backend,
-# which makes _load_model raise a clear error rather than serving a wrong model)
+# Model name mapping: Immich name -> the HF repo mlx_clip converts FROM
+# (or None = no parity-faithful MLX backend; _load_model raises for those).
+#
+# The value is passed to mlx_clip() as ``hf_repo``, NOT as the local model_dir.
+# mlx_clip's first positional arg is a LOCAL dir: if absent it converts its
+# ``hf_repo`` (default openai/clip-vit-base-patch32) into it. The prior code
+# passed the value POSITIONALLY as model_dir with no hf_repo, so every model
+# whose local dir didn't exist silently converted the DEFAULT OpenAI B-32
+# weights regardless of the requested name (ml-7j8.17) — ViT-B-32__openai was
+# correct only by coincidence (its target == the default). We now pass the
+# correct hf_repo so the RIGHT checkpoint is converted (see _load_model).
 MODEL_MAP = {
-    # OpenAI CLIP models -> MLX
-    "ViT-B-32__openai": "mlx-community/clip-vit-base-patch32",
-    "ViT-B-16__openai": "mlx-community/clip-vit-base-patch16",
-    "ViT-L-14__openai": "mlx-community/clip-vit-large-patch14",
-    # LAION CLIP models -> MLX
-    "ViT-B-32__laion2b-s34b-b79k": "mlx-community/clip-vit-base-patch32-laion2b",
-    "ViT-B-32__laion2b_s34b_b79k": "mlx-community/clip-vit-base-patch32-laion2b",
+    # OpenAI CLIP models -> mlx_clip, converting the CORRECT OpenAI checkpoint.
+    # mlx_clip hardcodes quick_gelu (model.py), which matches OpenAI CLIP, and
+    # its CLIPImageProcessor (resize-shortest + center-crop) matches the Immich
+    # index — so these are parity-faithful. The architecture (patch size, depth,
+    # width) is read from each repo's config.json, so B-16/L-14 load correctly.
+    "ViT-B-32__openai": "openai/clip-vit-base-patch32",
+    "ViT-B-16__openai": "openai/clip-vit-base-patch16",
+    "ViT-L-14__openai": "openai/clip-vit-large-patch14",
+    # LAION CLIP models -> None (no parity-faithful backend). mlx_clip hardcodes
+    # quick_gelu, but LAION trained with STANDARD gelu, so mlx_clip cannot
+    # reproduce LAION embeddings even from the correct checkpoint; open_clip (the
+    # only faithful backend) was removed (ml-b82). A request raises in
+    # _load_model rather than silently serving non-parity vectors (ml-7j8.17).
+    "ViT-B-32__laion2b-s34b-b79k": None,
+    "ViT-B-32__laion2b_s34b_b79k": None,
     # SigLIP / SigLIP2 models. The SO400M SigLIP2 default is handled natively via
     # MLX_EMBEDDINGS_MAP below (checked first in _load_model). The ViT-B-16 SigLIP
     # variants have no MLX backend (None), so _load_model raises a clear error for
@@ -53,8 +70,8 @@ MODEL_MAP = {
     "ViT-B-16-SigLIP__webli": None,
     "ViT-B-16-SigLIP2__webli": None,
     "ViT-SO400M-16-SigLIP2-384__webli": None,
-    # Default fallback
-    "default": "mlx-community/clip-vit-base-patch32",
+    # Default fallback (the OpenAI B-32 checkpoint mlx_clip also defaults to).
+    "default": "openai/clip-vit-base-patch32",
 }
 
 # Native MLX SigLIP2 backend via Blaizzy/mlx-embeddings. Maps Immich's
@@ -96,6 +113,19 @@ def _ml_model_cache_root() -> Path:
         return Path(env).expanduser()
     # src/models/clip.py -> parents[2] == ml repo root
     return Path(__file__).resolve().parents[2] / "models"
+
+
+def mlx_clip_cache_dir(hf_repo: str) -> Path:
+    """Local dir mlx_clip converts/loads weights into, keyed on the HF repo.
+
+    mlx_clip's first positional arg is a LOCAL model_dir: it loads from there if
+    present, else converts ``hf_repo`` into it. Keying the dir on the repo (not
+    the Immich model name) lets every name resolving to the same checkpoint share
+    one convert, and keeps the converted weights inside our managed cache root
+    instead of a stray dir named after the repo id in the process CWD (the prior
+    behaviour when the repo id was passed as model_dir — ml-7j8.17).
+    """
+    return _ml_model_cache_root() / f"mlx_clip-{hf_repo.replace('/', '__')}"
 
 
 def siglip2_cache_dir(repo_id: str) -> Path:
@@ -269,8 +299,8 @@ def _resolve_siglip2_tokenizer_json(path_or_repo: str) -> str:
 
 def _supported_model_names() -> list[str]:
     """CLIP model names this service can serve — native MLX SigLIP2 plus the
-    mlx_clip-backed OpenAI/LAION ports. Anything not listed here raises in
-    ``_load_model``."""
+    mlx_clip-backed OpenAI ports (LAION is unsupported — quick_gelu mismatch).
+    Anything not listed here raises in ``_load_model``."""
     return sorted(MLX_EMBEDDINGS_MAP) + sorted(
         k for k, v in MODEL_MAP.items() if v is not None and k != "default"
     )
@@ -315,12 +345,19 @@ class MLXClip:
         if self.model_name in MODEL_MAP:
             self._repo_id = MODEL_MAP[self.model_name]
             if self._repo_id is None:
-                # An explicitly-listed model with no MLX backend (the SigLIP v1/v2
-                # ViT-B-16 variants). Fail clearly rather than silently
-                # substituting the wrong (default) model.
+                # An explicitly-listed model with no parity-faithful backend:
+                # the SigLIP v1/v2 ViT-B-16 variants (open_clip's squash
+                # preprocessing diverged from the index) and the LAION ports
+                # (mlx_clip's hardcoded quick_gelu can't reproduce LAION's
+                # standard gelu). open_clip — their only faithful backend — was
+                # removed (ml-b82), so fail clearly rather than silently
+                # substituting the wrong (default) model (ml-7j8.17).
                 raise RuntimeError(
-                    f"CLIP model '{self.model_name}' has no MLX backend; only models with a "
-                    f"native MLX or mlx_clip port are served. Supported: {_supported_model_names()}."
+                    f"CLIP model '{self.model_name}' has no parity-faithful MLX backend. The "
+                    f"open_clip fallback was removed (ml-b82) because its SigLIP preprocessing "
+                    f"diverges from the Immich index, and mlx_clip's hardcoded quick_gelu cannot "
+                    f"reproduce LAION weights; only models with a native MLX or mlx_clip port are "
+                    f"served. Supported: {_supported_model_names()}."
                 )
         else:
             # An unmapped model name. This used to silently load MODEL_MAP['default']
@@ -336,8 +373,15 @@ class MLXClip:
 
         from mlx_clip import mlx_clip
 
-        logger.info(f"Loading MLX CLIP model: {self.model_name} -> {self._repo_id}")
-        self._model = mlx_clip(self._repo_id)
+        # mlx_clip(model_dir, hf_repo): pass the LOCAL cache dir as model_dir and
+        # the CORRECT checkpoint as hf_repo. On first use the dir is absent so
+        # mlx_clip converts hf_repo into it; afterwards it loads the converted
+        # weights. Passing self._repo_id positionally (the prior bug) made it the
+        # model_dir, so an absent dir silently converted the DEFAULT OpenAI B-32
+        # for every model (ml-7j8.17).
+        cache_dir = mlx_clip_cache_dir(self._repo_id)
+        logger.info(f"Loading MLX CLIP model: {self.model_name} -> hf_repo={self._repo_id}, cache={cache_dir}")
+        self._model = mlx_clip(str(cache_dir), hf_repo=self._repo_id)
         self._loaded = True
         logger.info(f"Successfully loaded CLIP model via MLX: {self.model_name}")
 
