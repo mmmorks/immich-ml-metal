@@ -323,8 +323,11 @@ to run it.
 ### Face-embedding parity (preserve vs re-scan)
 
 Face **recognition** is the same upstream model and metric: InsightFace
-`buffalo_l` ArcFace (`w600k_r50`), the same `face_align.norm_crop` 112×112
-alignment, and cosine search. The one thing this fork changes is **detection +
+`buffalo_l` ArcFace (`w600k_r50`), bit-identical 112×112 `norm_crop` alignment
+(`face_embed._norm_crop` reimplements insightface's 5-point similarity warp on
+skimage's current `SimilarityTransform.from_estimate` instead of the deprecated
+in-place `estimate()`; verified equal to 0 ULP in `tests/test_face_align_parity.py`),
+and cosine search. The one thing this fork changes is **detection +
 5-point landmarks** — upstream Immich uses the `buffalo_l` SCRFD detector
 (`det_10g.onnx`; the "RetinaFace" in old notes), which emits keypoints directly,
 while this fork reconstructs the 5 points from Apple Vision face-landmark

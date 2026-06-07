@@ -29,6 +29,61 @@ _model_lock = threading.Lock()
 # once per face after releasing the batch-level acquisition.
 _inference_lock = threading.Lock()
 
+# 5-point ArcFace reference template (112x112), byte-for-byte the same array as
+# insightface.utils.face_align.arcface_dst. We keep our own copy so alignment
+# can call skimage's current SimilarityTransform.from_estimate constructor
+# instead of insightface's internal tform.estimate(), which skimage deprecated
+# in 0.26 and will remove in 2.2. from_estimate uses the identical umeyama
+# estimate, so the affine matrix — and thus the aligned crop — is bit-identical
+# to insightface's on the success path (verified to 0 ULP; see test_face_align_parity).
+_ARCFACE_DST = np.array(
+    [[38.2946, 51.6963], [73.5318, 51.5014], [56.0252, 71.7366],
+     [41.5493, 92.3655], [70.7299, 92.2041]],
+    dtype=np.float32,
+)
+
+
+def _norm_crop(img: np.ndarray, landmarks: np.ndarray, image_size: int = ARCFACE_INPUT_SIZE) -> np.ndarray:
+    """Pose-normalize a face to the ArcFace template via a 5-point similarity warp.
+
+    Drop-in replacement for ``insightface.utils.face_align.norm_crop`` (same
+    template, same ratio/diff_x logic, same ``cv2.warpAffine``) that uses
+    skimage's non-deprecated ``SimilarityTransform.from_estimate`` instead of the
+    in-place ``tform.estimate``. Output is identical to insightface for any valid
+    5-point set.
+
+    Raises ``ValueError`` if the landmarks are not 5x2 or the geometry is too
+    degenerate to estimate (``from_estimate`` returns a falsy ``FailedEstimation``).
+    Callers already treat an alignment exception as "skip this face" (ml-6o9), so a
+    face we can't pose-normalize is left un-embedded rather than warped through a
+    NaN matrix into a garbage crop — the one intended deviation from insightface,
+    which silently does the latter.
+    """
+    from skimage.transform import SimilarityTransform
+
+    landmarks = np.asarray(landmarks, dtype=np.float32)
+    if landmarks.shape != (5, 2):
+        raise ValueError(f"expected 5x2 landmarks for alignment, got shape {landmarks.shape}")
+
+    if image_size % 112 == 0:
+        ratio = image_size / 112.0
+        diff_x = 0.0
+    elif image_size % 128 == 0:
+        ratio = image_size / 128.0
+        diff_x = 8.0 * ratio
+    else:
+        raise ValueError(f"image_size must be a multiple of 112 or 128, got {image_size}")
+
+    dst = _ARCFACE_DST * ratio
+    dst[:, 0] += diff_x
+
+    tform = SimilarityTransform.from_estimate(landmarks, dst)
+    if not tform:  # FailedEstimation — degenerate/collinear landmarks
+        raise ValueError(f"similarity-transform estimation failed for landmarks: {tform}")
+    M = np.asarray(tform.params)[0:2, :]
+
+    return cv2.warpAffine(img, M, (image_size, image_size), borderValue=0.0)
+
 
 def get_recognition_model(model_name: str = "buffalo_l"):
     """
@@ -243,12 +298,6 @@ def get_face_embedding(image_bytes: bytes, landmarks: list[list[float]], model_n
         512-dimensional normalized embedding as float32 array
     """
     try:
-        from insightface.utils import face_align
-    except ImportError as e:
-        logger.error("insightface not available")
-        raise RuntimeError("Install insightface: pip install insightface") from e
-
-    try:
         nparr = np.frombuffer(image_bytes, np.uint8)
         img_bgr = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         if img_bgr is None:
@@ -260,7 +309,7 @@ def get_face_embedding(image_bytes: bytes, landmarks: list[list[float]], model_n
     kps = np.array(landmarks, dtype=np.float32)
 
     try:
-        aligned_face = face_align.norm_crop(img_bgr, kps, image_size=ARCFACE_INPUT_SIZE)
+        aligned_face = _norm_crop(img_bgr, kps, ARCFACE_INPUT_SIZE)
     except Exception as e:
         logger.error(f"Face alignment failed: {e}")
         raise
@@ -306,12 +355,6 @@ def get_face_embeddings_batch(img_bgr: np.ndarray, faces: list[dict], model_name
     if not faces:
         return []
 
-    try:
-        from insightface.utils import face_align
-    except ImportError as e:
-        logger.error("insightface not available")
-        raise RuntimeError("Install insightface: pip install insightface") from e
-
     # --- Align every face (landmark-based pose normalization only) ---
     # A face WITHOUT 5-point landmarks is skipped, not bbox-cropped: a plain
     # bbox crop has no pose normalization, so its ArcFace embedding lives in a
@@ -333,7 +376,7 @@ def get_face_embeddings_batch(img_bgr: np.ndarray, faces: list[dict], model_name
             continue
         try:
             kps = np.array(face["landmarks"], dtype=np.float32)
-            aligned.append(face_align.norm_crop(img_bgr, kps, image_size=ARCFACE_INPUT_SIZE))
+            aligned.append(_norm_crop(img_bgr, kps, ARCFACE_INPUT_SIZE))
         except Exception as e:
             logger.warning("Face alignment failed for face %s: %s", face.get("boundingBox"), e)
             aligned.append(None)

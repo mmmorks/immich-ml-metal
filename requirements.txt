@@ -41,6 +41,11 @@ onnxruntime>=1.18.0
 # InferenceSession (also a transitive insightface dep; pinned explicitly)
 onnx>=1.16.0
 insightface>=0.7.3
+# Used directly by face_embed._norm_crop for the 5-point ArcFace similarity
+# transform (SimilarityTransform.from_estimate). Also a transitive insightface
+# dep, but we import it ourselves now, so pin it explicitly. >=0.26 is where the
+# from_estimate constructor exists (and the in-place estimate() was deprecated).
+scikit-image>=0.26
 
 # Development/testing
 pytest>=8.0.0
