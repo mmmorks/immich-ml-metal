@@ -1,0 +1,73 @@
+
+==============================================================================
+EMBEDDING PARITY: MLX SigLIP2 vs reference
+==============================================================================
+Model: ViT-SO400M-16-SigLIP2-384__webli  |  images: 12  queries: 12
+Threshold (gate, immich image): >= 0.99
+
+### MLX vs immich
+  IMAGE cosine: min=0.9999 mean=1.0000 median=1.0000 max=1.0000
+  TEXT  cosine: min=1.0000 mean=1.0000 median=1.0000 max=1.0000
+  Cross-modal: top-1 retrieval agreement=1.000 matrix_corr=1.0000
+  per-image:
+    1.0000  picsum_100
+    1.0000  picsum_101
+    1.0000  picsum_102
+    1.0000  picsum_103
+    1.0000  picsum_104
+    1.0000  picsum_105
+    1.0000  picsum_106
+    1.0000  picsum_107
+    0.9999  picsum_108
+    1.0000  picsum_109
+    1.0000  picsum_110
+    1.0000  picsum_111
+  per-query:
+    1.0000  'a photo of a cat'
+    1.0000  'a dog playing in the park'
+    1.0000  'a red sports car on a highway'
+    1.0000  'a plate of food on a wooden table'
+    1.0000  'a sunset over the ocean'
+    1.0000  'people walking on a city street at night'
+    1.0000  'a snowy mountain landscape'
+    1.0000  'a child blowing out birthday candles'
+    1.0000  'a laptop and a cup of coffee on a desk'
+    1.0000  'a close-up of a flower with a bee'
+    1.0000  'an old stone building with arched windows'
+    1.0000  'a screenshot of a chat conversation'
+
+### MLX vs transformers
+  IMAGE cosine: min=0.7947 mean=0.8305 median=0.8351 max=0.8603
+  TEXT  cosine: min=0.9776 mean=0.9981 median=1.0000 max=1.0000
+  Cross-modal: top-1 retrieval agreement=0.917 matrix_corr=0.9449
+  per-image:
+    0.8367  picsum_100  <-- below threshold
+    0.8376  picsum_101  <-- below threshold
+    0.8205  picsum_102  <-- below threshold
+    0.8252  picsum_103  <-- below threshold
+    0.7947  picsum_104  <-- below threshold
+    0.8365  picsum_105  <-- below threshold
+    0.8459  picsum_106  <-- below threshold
+    0.8105  picsum_107  <-- below threshold
+    0.8337  picsum_108  <-- below threshold
+    0.8459  picsum_109  <-- below threshold
+    0.8189  picsum_110  <-- below threshold
+    0.8603  picsum_111  <-- below threshold
+  per-query:
+    1.0000  'a photo of a cat'
+    1.0000  'a dog playing in the park'
+    1.0000  'a red sports car on a highway'
+    1.0000  'a plate of food on a wooden table'
+    1.0000  'a sunset over the ocean'
+    1.0000  'people walking on a city street at night'
+    1.0000  'a snowy mountain landscape'
+    1.0000  'a child blowing out birthday candles'
+    1.0000  'a laptop and a cup of coffee on a desk'
+    0.9776  'a close-up of a flower with a bee'  <-- below threshold
+    1.0000  'an old stone building with arched windows'
+    1.0000  'a screenshot of a chat conversation'
+
+------------------------------------------------------------------------------
+VERDICT: PASS (min image cosine vs Immich server >= 0.99).
+  => PRESERVE the existing index; the MLX backend reproduces it.
+------------------------------------------------------------------------------
