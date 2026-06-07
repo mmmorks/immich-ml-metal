@@ -26,12 +26,25 @@ MODEL_MAP = {
     # LAION CLIP models -> MLX
     "ViT-B-32__laion2b-s34b-b79k": "mlx-community/clip-vit-base-patch32-laion2b",
     "ViT-B-32__laion2b_s34b_b79k": "mlx-community/clip-vit-base-patch32-laion2b",
-    # SigLIP models -> None (use open_clip fallback)
+    # SigLIP / SigLIP2 models -> None here. SigLIP2 names handled natively via
+    # MLX_EMBEDDINGS_MAP below (checked first in _load_model); anything that
+    # stays None falls through to the open_clip fallback.
     "ViT-B-16-SigLIP__webli": None,
     "ViT-B-16-SigLIP2__webli": None,
     "ViT-SO400M-16-SigLIP2-384__webli": None,
     # Default fallback
     "default": "mlx-community/clip-vit-base-patch32",
+}
+
+# Native MLX SigLIP2 backend via Blaizzy/mlx-embeddings. Maps Immich's
+# open_clip-style model name to the HF repo id the mlx-embeddings loader
+# understands. The repo/dir name MUST contain a 'patchNN-NNN' token or the
+# loader's regex (which is the only patch_size source — config.json omits it)
+# crashes. mlx-embeddings loads the HF bf16 safetensors directly, so no
+# separate conversion step is required (ml-ycd.7 productionizes caching).
+# See the ml-ycd.1 spike writeup for the full rationale.
+MLX_EMBEDDINGS_MAP = {
+    "ViT-SO400M-16-SigLIP2-384__webli": "google/siglip2-so400m-patch16-384",
 }
 
 # open_clip model name mappings for fallback
@@ -66,6 +79,20 @@ class MLXClip:
 
     def _load_model(self):
         """Load the MLX CLIP model, or fallback to open_clip."""
+        # Native MLX SigLIP2 backend (mlx-embeddings) takes precedence for
+        # mapped names; on any failure fall back to open_clip.
+        if self.model_name in MLX_EMBEDDINGS_MAP:
+            try:
+                self._load_siglip2_mlx()
+                return
+            except Exception as e:
+                logger.error(
+                    f"mlx-embeddings SigLIP2 load failed: {e}", exc_info=True
+                )
+                logger.info("Falling back to open_clip for SigLIP2")
+                self._load_fallback()
+                return
+
         self._repo_id = MODEL_MAP.get(self.model_name)
 
         if self._repo_id is None and self.model_name not in OPENCLIP_MAP:
@@ -96,6 +123,35 @@ class MLXClip:
             logger.error(f"MLX model loading failed: {e}", exc_info=True)
             logger.info("Falling back to open_clip")
             self._load_fallback()
+
+    def _load_siglip2_mlx(self):
+        """Load a SigLIP2 model natively via mlx-embeddings.
+
+        Returns (model, SiglipProcessor); the processor exposes both an
+        image_processor and a tokenizer. Inference uses
+        get_image_features / get_text_features (single-modality, un-normalized)
+        — NOT Model.__call__, which requires both modalities (see ml-ycd.1).
+        """
+        import os
+
+        from mlx_embeddings.utils import load
+
+        repo = MLX_EMBEDDINGS_MAP[self.model_name]
+        # Seam for ml-ycd.7: a pre-converted local weights dir may be supplied
+        # via ML_SIGLIP2_MLX_PATH. Its name must still contain 'patchNN-NNN'.
+        override = os.getenv("ML_SIGLIP2_MLX_PATH")
+        path_or_repo = override or repo
+
+        logger.info(
+            f"Loading SigLIP2 via mlx-embeddings: {self.model_name} -> {path_or_repo}"
+        )
+        self._model, self._processor = load(path_or_repo)
+        self._repo_id = path_or_repo
+        self._use_mlx_embeddings = True
+        self._loaded = True
+        logger.info(
+            f"Successfully loaded SigLIP2 via mlx-embeddings: {self.model_name}"
+        )
 
     def _load_fallback(self):
         """Fallback to open_clip with MPS acceleration."""
@@ -174,6 +230,9 @@ class MLXClip:
 
         # Decode outside lock — this is CPU work, not GPU
         image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+
+        if getattr(self, "_use_mlx_embeddings", False):
+            return self._encode_image_siglip2(image)
 
         if hasattr(self, "_use_fallback") and self._use_fallback:
             return self._encode_image_fallback(image)
@@ -259,6 +318,46 @@ class MLXClip:
 
         raise RuntimeError("CLIP encode_image_fallback failed to produce an embedding")
 
+    def _encode_image_siglip2(self, image: Image.Image) -> np.ndarray:
+        """Encode image via the native MLX SigLIP2 backend (mlx-embeddings).
+
+        Preprocessing (FixRes 384 resize/normalize via the SiglipProcessor)
+        runs outside the lock; only Metal inference is serialized. Model
+        reference is captured before preprocessing and verified after lock
+        acquisition, with one retry on a concurrent model swap — mirroring
+        encode_image. get_image_features returns an un-normalized (1, 1152)
+        pooled output, so we L2-normalize manually.
+        """
+        for attempt in range(2):
+            model_ref = self._model
+            processor_ref = self._processor
+            if model_ref is None:
+                raise RuntimeError(
+                    "CLIP model was unloaded during a concurrent model switch"
+                )
+            inputs = processor_ref(images=[image], return_tensors="mlx")
+
+            with self._inference_lock:
+                if self._model is not model_ref:
+                    if attempt == 0:
+                        logger.warning(
+                            "CLIP model changed during preprocessing (siglip2), retrying"
+                        )
+                        continue
+                    raise RuntimeError(
+                        "CLIP model changed during preprocessing after retry"
+                    )
+                features = model_ref.get_image_features(
+                    pixel_values=inputs["pixel_values"]
+                )
+                # Force Metal evaluation inside the lock — MLX arrays are lazy.
+                embedding = np.array(features[0])
+
+            embedding = embedding / np.linalg.norm(embedding)
+            return embedding.flatten().astype(np.float32)
+
+        raise RuntimeError("CLIP encode_image_siglip2 failed to produce an embedding")
+
     def encode_text(self, text: str) -> np.ndarray:
         """
         Generate CLIP embedding for text.
@@ -266,6 +365,9 @@ class MLXClip:
         """
         if not self._loaded:
             raise RuntimeError("Model not loaded")
+
+        if getattr(self, "_use_mlx_embeddings", False):
+            return self._encode_text_siglip2(text)
 
         if hasattr(self, "_use_fallback") and self._use_fallback:
             return self._encode_text_fallback(text)
@@ -317,6 +419,49 @@ class MLXClip:
 
         raise RuntimeError("CLIP encode_text_fallback failed to produce an embedding")
 
+    def _encode_text_siglip2(self, text: str) -> np.ndarray:
+        """Encode text via the native MLX SigLIP2 backend (mlx-embeddings).
+
+        Tokenization (FixRes: pad to max_length 64, the SigLIP canonical text
+        length) runs outside the lock; only Metal inference is serialized.
+        Model-ref capture + one retry on a concurrent swap, matching the other
+        encode paths. get_text_features returns an un-normalized (1, 1152)
+        pooled output, so we L2-normalize manually.
+        """
+        for attempt in range(2):
+            model_ref = self._model
+            processor_ref = self._processor
+            if model_ref is None:
+                raise RuntimeError(
+                    "CLIP model was unloaded during a concurrent model switch"
+                )
+            inputs = processor_ref(
+                text=[text],
+                return_tensors="mlx",
+                padding="max_length",
+                max_length=64,
+                truncation=True,
+            )
+
+            with self._inference_lock:
+                if self._model is not model_ref:
+                    if attempt == 0:
+                        logger.warning(
+                            "CLIP model changed during tokenization (siglip2), retrying"
+                        )
+                        continue
+                    raise RuntimeError(
+                        "CLIP model changed during tokenization after retry"
+                    )
+                features = model_ref.get_text_features(input_ids=inputs["input_ids"])
+                # Force Metal evaluation inside the lock — MLX arrays are lazy.
+                embedding = np.array(features[0])
+
+            embedding = embedding / np.linalg.norm(embedding)
+            return embedding.flatten().astype(np.float32)
+
+        raise RuntimeError("CLIP encode_text_siglip2 failed to produce an embedding")
+
     def unload(self):
         """Unload model and free memory."""
         logger.info(f"Unloading CLIP model: {self.model_name}")
@@ -324,6 +469,7 @@ class MLXClip:
         self._processor = None
         self._tokenizer = None
         self._loaded = False
+        self._use_mlx_embeddings = False
 
         gc.collect()
 
