@@ -117,9 +117,10 @@ def _unload_model(model_type: str, reason: str) -> None:
         elif model_type == "face":
             from .models import face_embed as face_module
 
-            if face_module._recognition_model is not None:
-                face_module.unload_recognition_model()
-                logger.info("Unloaded face model (%s)", reason)
+            with face_module._model_lock:
+                if face_module._recognition_model is not None:
+                    face_module.unload_recognition_model()
+                    logger.info("Unloaded face model (%s)", reason)
             _model_last_used.pop("face", None)
     except Exception as e:
         logger.warning("Model unload failed for %s: %s", model_type, e)
