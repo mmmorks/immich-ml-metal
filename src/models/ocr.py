@@ -87,8 +87,12 @@ def recognize_text(image_bytes: bytes, min_confidence: float = 0.0, use_language
         pil_image = Image.open(io.BytesIO(image_bytes))
         img_width, img_height = pil_image.size
     except Exception as e:
-        logger.error(f"Failed to load image: {e}")
-        return {"text": [], "box": [], "boxScore": [], "textScore": []}
+        # Hard decode failure — raise so the request fails (non-2xx) and Immich
+        # retries, instead of silently returning an empty result that marks the
+        # asset permanently processed and hides the failure (ml-1s2). This is a
+        # hard error, distinct from a genuinely text-free image (empty success).
+        logger.error(f"Failed to load image for OCR: {e}")
+        raise
 
     # Use autorelease pool to prevent memory accumulation in long-running service
     pool = NSAutoreleasePool.alloc().init()
@@ -113,8 +117,10 @@ def _recognize_text_impl(image_bytes: bytes, img_width: int, img_height: int, mi
         success, error = handler.performRequests_error_([request], None)
 
         if not success or error:
-            logger.error(f"Vision OCR error: {error}")
-            return {"text": [], "box": [], "boxScore": [], "textScore": []}
+            # Hard Vision-framework failure — raise so Immich retries rather
+            # than recording a false "no text" result (ml-1s2). A successful
+            # request with zero observations falls through to an empty result.
+            raise RuntimeError(f"Vision OCR request failed: {error}")
 
         texts = []
         boxes = []
@@ -166,8 +172,11 @@ def _recognize_text_impl(image_bytes: bytes, img_width: int, img_height: int, mi
         return {"text": texts, "box": boxes, "boxScore": box_scores, "textScore": text_scores}
 
     except Exception as e:
+        # Unexpected hard failure during recognition — log with traceback, then
+        # re-raise so the request fails and Immich retries rather than storing a
+        # false empty result (ml-1s2).
         logger.error(f"OCR failed: {e}", exc_info=True)
-        return {"text": [], "box": [], "boxScore": [], "textScore": []}
+        raise
 
 
 if __name__ == "__main__":

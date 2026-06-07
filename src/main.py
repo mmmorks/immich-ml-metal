@@ -339,8 +339,11 @@ def _run_face_recognition_sync(image_bytes: bytes, min_score: float, model_name:
         nparr = np.frombuffer(image_bytes, np.uint8)
         img_bgr = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         if img_bgr is None:
-            logger.error("Failed to decode image for face recognition")
-            return []
+            # Hard decode failure — raise so the request fails (non-2xx) and
+            # Immich retries, rather than returning an empty result that marks
+            # the asset processed and permanently drops its faces (ml-1s2). A
+            # genuinely face-free image returns [] earlier via scored_faces.
+            raise RuntimeError("Failed to decode image for face recognition")
 
         # Single batched inference
         embeddings = get_face_embeddings_batch(img_bgr, scored_faces, model_name)
