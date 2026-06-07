@@ -1,5 +1,5 @@
 # Pre-commit gate for the ml submodule (immich-ml-metal).
-# Install once with: pre-commit install
+# Installed by the parent repo's ./scripts/setup-git-hooks.sh (or: pre-commit install)
 #
 # ruff (lint + format) + a gitleaks secret scan run here. gitleaks runs at
 # commit time on purpose: a secret caught only in CI is already on the remote.
