@@ -154,6 +154,46 @@ async def test_health_exposes_error_details_with_debug(client, monkeypatch):
     assert data["checks"]["clip"] == f"error: {SECRET}"
 
 
+@pytest.mark.asyncio
+async def test_health_reports_model_state_stub(client):
+    """Additive /health fields: model load state + unload strategy.
+
+    In STUB_MODE nothing is loaded and the model modules must not be imported.
+    The existing contract (status/stub_mode/checks) must remain intact.
+    """
+    resp = await client.get("/health")
+    data = resp.json()
+    # additive fields
+    assert data["models"]["clip"] == {"loaded": False, "name": None}
+    assert data["models"]["face"] == {"loaded": False, "name": None}
+    assert data["unload_strategy"] == main.MODEL_UNLOAD_STRATEGY
+    # existing contract unchanged
+    assert data["status"] == "healthy"
+    assert data["stub_mode"] is True
+    assert "checks" in data
+
+
+@pytest.mark.asyncio
+async def test_health_reports_loaded_model_names(client, monkeypatch):
+    """/health surfaces the loaded CLIP/face model names so the dashboard can
+    confirm it is serving the right (non-fallback) models."""
+    import src.models.clip as clip_module
+    import src.models.face_embed as face_module
+
+    monkeypatch.setattr(main, "STUB_MODE", False)
+    LIVE_CLIP = "ViT-SO400M-16-SigLIP2-384__webli"
+    monkeypatch.setattr(clip_module, "_current_model_name", LIVE_CLIP)
+    monkeypatch.setattr(face_module, "_current_model_name", "buffalo_l")
+    # Neutralize the probe sub-checks so they don't load real models.
+    monkeypatch.setattr(main, "get_clip", lambda name="": object())
+    monkeypatch.setattr(face_module, "get_recognition_model", lambda *a, **k: object())
+
+    resp = await client.get("/health")
+    data = resp.json()
+    assert data["models"]["clip"] == {"loaded": True, "name": LIVE_CLIP}
+    assert data["models"]["face"] == {"loaded": True, "name": "buffalo_l"}
+
+
 # --- Predict: single tasks ---
 
 

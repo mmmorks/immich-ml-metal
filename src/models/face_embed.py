@@ -284,6 +284,15 @@ def unload_recognition_model():
         gc.collect()
 
 
+def get_loaded_face_model_name() -> str | None:
+    """Name of the currently-loaded face recognition model, or None if none.
+
+    Lets /health and the dashboard report face-model load state without forcing
+    a load (mirrors clip.get_loaded_clip_model_name).
+    """
+    return _current_model_name
+
+
 def get_face_embedding(image_bytes: bytes, landmarks: list[list[float]], model_name: str = "buffalo_l") -> np.ndarray:
     """
     Generate 512-dim face embedding using ArcFace (thread-safe).

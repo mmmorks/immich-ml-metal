@@ -432,6 +432,29 @@ async def health():
         else:
             health_status["checks"]["stub_mode"] = "active"
 
+        # Additive observability fields. These are NOT part of the upstream
+        # Immich ML contract (upstream has no /health endpoint at all — only
+        # /, /ping, /predict); they exist for our dashboard and `ml-test`.
+        # Kept strictly additive so existing /health consumers are unaffected.
+        # In STUB_MODE we avoid importing the model modules (they pull in mlx)
+        # and report nothing loaded.
+        if STUB_MODE:
+            health_status["models"] = {
+                "clip": {"loaded": False, "name": None},
+                "face": {"loaded": False, "name": None},
+            }
+        else:
+            from .models.clip import get_loaded_clip_model_name
+            from .models.face_embed import get_loaded_face_model_name
+
+            clip_name = get_loaded_clip_model_name()
+            face_name = get_loaded_face_model_name()
+            health_status["models"] = {
+                "clip": {"loaded": clip_name is not None, "name": clip_name},
+                "face": {"loaded": face_name is not None, "name": face_name},
+            }
+        health_status["unload_strategy"] = MODEL_UNLOAD_STRATEGY
+
         return JSONResponse(content=health_status)
 
     except Exception as e:
