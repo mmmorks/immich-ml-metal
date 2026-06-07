@@ -15,6 +15,7 @@ import io
 import gc
 import logging
 import os
+import re
 import threading
 
 from src.models.immich_preprocess import siglip_image_pixels
@@ -116,6 +117,69 @@ def resolve_siglip2_source(repo_id: str) -> tuple[str, str]:
     if siglip2_dir_is_complete(cache):
         return str(cache), "cache"
     return repo_id, "hf"
+
+
+def _siglip2_auto_convert_enabled() -> bool:
+    """On-demand fp16 convert toggle (default on).
+
+    Set ``ML_SIGLIP2_AUTO_CONVERT=0`` (or false/no) to keep loading the HF bf16
+    weights directly instead of converting on first use.
+    """
+    return os.getenv("ML_SIGLIP2_AUTO_CONVERT", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+    )
+
+
+def ensure_siglip2_source(repo_id: str) -> tuple[str, str]:
+    """Resolve the SigLIP2 weights source, converting on demand if needed (ml-u2d).
+
+    Like :func:`resolve_siglip2_source`, but when resolution would fall through to
+    the HF bf16 repo (no override, no complete local cache) and auto-convert is
+    enabled, run a one-time fp16 convert into the local cache dir and load from
+    there (``source='cache'``). The convert is heavy (~2.2 GB write), so it only
+    runs when nothing local exists. Any failure — a missing 'patchNN-NNN' token in
+    the cache dir name (the loader regex needs it), a convert error, or an
+    incomplete result — logs and falls back to the HF repo so a load never breaks.
+    """
+    path_or_repo, source = resolve_siglip2_source(repo_id)
+    if source != "hf" or not _siglip2_auto_convert_enabled():
+        return path_or_repo, source
+
+    out = siglip2_cache_dir(repo_id)
+    if not re.search(r"patch\d+-\d+", out.name):
+        logger.warning(
+            f"Skipping on-demand SigLIP2 convert: cache dir name {out.name!r} "
+            "lacks a 'patchNN-NNN' token the loader regex needs; loading HF bf16"
+        )
+        return repo_id, "hf"
+
+    logger.info(
+        f"No local SigLIP2 convert found; converting {repo_id} -> {out} once "
+        "(fp16, ~2.2 GB; set ML_SIGLIP2_AUTO_CONVERT=0 to load HF bf16 instead)"
+    )
+    try:
+        from mlx_embeddings.convert import convert
+
+        out.parent.mkdir(parents=True, exist_ok=True)
+        convert(hf_path=repo_id, mlx_path=str(out), dtype="float16")
+    except Exception as e:
+        logger.warning(
+            f"On-demand SigLIP2 convert failed ({e}); loading HF bf16 instead",
+            exc_info=True,
+        )
+        return repo_id, "hf"
+
+    if not siglip2_dir_is_complete(out):
+        logger.warning(
+            f"On-demand SigLIP2 convert left {out} incomplete; loading HF bf16"
+        )
+        return repo_id, "hf"
+
+    logger.info(f"On-demand SigLIP2 convert complete -> {out}")
+    return str(out), "cache"
+
 
 # open_clip model name mappings for fallback
 OPENCLIP_MAP = {
@@ -230,11 +294,13 @@ class MLXClip:
         from mlx_embeddings.utils import load
 
         repo = MLX_EMBEDDINGS_MAP[self.model_name]
-        # ml-ycd.7: prefer a local fp16 convert over the HF bf16 download.
-        # resolve_siglip2_source picks (in order) the ML_SIGLIP2_MLX_PATH
-        # override, a complete cache dir, else the HF repo id. Any local dir
-        # name must still contain 'patchNN-NNN' (the loader regex needs it).
-        path_or_repo, source = resolve_siglip2_source(repo)
+        # ml-ycd.7 / ml-u2d: prefer a local fp16 convert over the HF bf16 download,
+        # converting on demand the first time none exists. ensure_siglip2_source
+        # picks (in order) the ML_SIGLIP2_MLX_PATH override, a complete cache dir,
+        # else converts into the cache dir once (unless ML_SIGLIP2_AUTO_CONVERT=0),
+        # falling back to the HF repo id on any failure. Any local dir name must
+        # still contain 'patchNN-NNN' (the loader regex needs it).
+        path_or_repo, source = ensure_siglip2_source(repo)
 
         logger.info(
             f"Loading SigLIP2 via mlx-embeddings: {self.model_name} -> "

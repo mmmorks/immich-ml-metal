@@ -13,10 +13,12 @@ resolution logic (no weights, no network):
     then a complete cache dir, then falls back to the HF repo id.
 """
 import re
+from pathlib import Path
 
 import pytest
 
 from src.models.clip import (
+    ensure_siglip2_source,
     resolve_siglip2_source,
     siglip2_cache_dir,
     siglip2_dir_is_complete,
@@ -124,3 +126,105 @@ def test_resolve_ignores_incomplete_cache(monkeypatch, tmp_path):
     path, source = resolve_siglip2_source(REPO)
     assert source == "hf"
     assert path == REPO
+
+
+# --- ensure_siglip2_source (on-demand convert, ml-u2d) -----------------------
+
+
+def _patch_convert(monkeypatch, conv):
+    """Patch mlx_embeddings.convert.convert (the submodule attr the impl imports).
+
+    ``mlx_embeddings.__init__`` re-exports the convert function, shadowing the
+    submodule on the package object. ``import mlx_embeddings.convert`` (and a
+    dotted setattr target) therefore resolve to the function, not the module —
+    CPython's import-as does a getattr first. importlib.import_module returns the
+    real submodule from sys.modules, which is what ``from mlx_embeddings.convert
+    import convert`` reads at call time, so patching it there takes effect.
+    """
+    import importlib
+
+    conv_mod = importlib.import_module("mlx_embeddings.convert")
+    monkeypatch.setattr(conv_mod, "convert", conv)
+
+
+def _fake_convert(*, boom=False, complete=True):
+    """Build a stub mlx_embeddings convert() that records calls and, on success,
+    writes a (complete or partial) converted dir at mlx_path."""
+    calls = []
+
+    def _convert(hf_path, mlx_path, dtype="float16", upload_repo=None):
+        calls.append({"hf_path": hf_path, "mlx_path": mlx_path, "dtype": dtype})
+        if boom:
+            raise RuntimeError("convert exploded")
+        p = Path(mlx_path)
+        p.mkdir(parents=True, exist_ok=True)
+        (p / "config.json").write_text("{}")
+        (p / "model.safetensors").write_bytes(b"\x00")
+        if complete:
+            (p / "tokenizer.json").write_text("{}")
+
+    return _convert, calls
+
+
+@pytest.fixture
+def hf_miss(monkeypatch, tmp_path):
+    """No override, empty cache root, auto-convert enabled -> resolves to hf."""
+    monkeypatch.delenv("ML_SIGLIP2_MLX_PATH", raising=False)
+    monkeypatch.delenv("ML_SIGLIP2_AUTO_CONVERT", raising=False)
+    monkeypatch.setenv("ML_MODEL_CACHE_DIR", str(tmp_path))
+    return tmp_path
+
+
+def test_ensure_returns_override_without_converting(monkeypatch, tmp_path):
+    monkeypatch.setenv("ML_SIGLIP2_MLX_PATH", "/some/override/patch16-384")
+    conv, calls = _fake_convert()
+    _patch_convert(monkeypatch, conv)
+    path, source = ensure_siglip2_source(REPO)
+    assert (source, path) == ("override", "/some/override/patch16-384")
+    assert calls == [], "must not convert when an override is set"
+
+
+def test_ensure_returns_complete_cache_without_converting(hf_miss, monkeypatch):
+    cache = hf_miss / "siglip2-so400m-patch16-384"
+    _populate(cache)
+    conv, calls = _fake_convert()
+    _patch_convert(monkeypatch, conv)
+    path, source = ensure_siglip2_source(REPO)
+    assert (source, path) == ("cache", str(cache))
+    assert calls == [], "must not re-convert when a complete cache exists"
+
+
+def test_ensure_converts_on_hf_miss(hf_miss, monkeypatch):
+    cache = hf_miss / "siglip2-so400m-patch16-384"
+    conv, calls = _fake_convert()
+    _patch_convert(monkeypatch, conv)
+    path, source = ensure_siglip2_source(REPO)
+    assert (source, path) == ("cache", str(cache))
+    assert len(calls) == 1
+    assert calls[0]["hf_path"] == REPO
+    assert calls[0]["mlx_path"] == str(cache)
+    assert calls[0]["dtype"] == "float16"
+
+
+def test_ensure_respects_disable_env(hf_miss, monkeypatch):
+    monkeypatch.setenv("ML_SIGLIP2_AUTO_CONVERT", "0")
+    conv, calls = _fake_convert()
+    _patch_convert(monkeypatch, conv)
+    path, source = ensure_siglip2_source(REPO)
+    assert (source, path) == ("hf", REPO)
+    assert calls == [], "must not convert when auto-convert is disabled"
+
+
+def test_ensure_falls_back_to_hf_on_convert_error(hf_miss, monkeypatch):
+    conv, calls = _fake_convert(boom=True)
+    _patch_convert(monkeypatch, conv)
+    path, source = ensure_siglip2_source(REPO)
+    assert (source, path) == ("hf", REPO)
+    assert len(calls) == 1, "convert was attempted, then we fell back"
+
+
+def test_ensure_falls_back_to_hf_on_incomplete_convert(hf_miss, monkeypatch):
+    conv, calls = _fake_convert(complete=False)  # no tokenizer.json written
+    _patch_convert(monkeypatch, conv)
+    path, source = ensure_siglip2_source(REPO)
+    assert (source, path) == ("hf", REPO)
