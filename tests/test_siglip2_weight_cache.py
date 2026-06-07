@@ -168,9 +168,14 @@ def _fake_convert(*, boom=False, complete=True):
 
 @pytest.fixture
 def hf_miss(monkeypatch, tmp_path):
-    """No override, empty cache root, auto-convert enabled -> resolves to hf."""
+    """No override, empty cache root, HF-repo download disabled, auto-convert on.
+
+    Isolates the local-convert branch: ML_SIGLIP2_HF_REPO is blanked so the
+    pre-converted download step is skipped and resolution goes straight to convert.
+    """
     monkeypatch.delenv("ML_SIGLIP2_MLX_PATH", raising=False)
     monkeypatch.delenv("ML_SIGLIP2_AUTO_CONVERT", raising=False)
+    monkeypatch.setenv("ML_SIGLIP2_HF_REPO", "")  # skip the download step
     monkeypatch.setenv("ML_MODEL_CACHE_DIR", str(tmp_path))
     return tmp_path
 
@@ -228,3 +233,108 @@ def test_ensure_falls_back_to_hf_on_incomplete_convert(hf_miss, monkeypatch):
     _patch_convert(monkeypatch, conv)
     path, source = ensure_siglip2_source(REPO)
     assert (source, path) == ("hf", REPO)
+
+
+# --- ensure_siglip2_source: pre-converted HF-repo download (ml-ivw) ----------
+
+
+def _fake_snapshot(*, boom=False, complete=True):
+    """Build a stub huggingface_hub.snapshot_download that records calls and, on
+    success, writes a (complete or partial) converted dir into local_dir."""
+    calls = []
+
+    def _snap(repo_id, local_dir, **kwargs):
+        calls.append({"repo_id": repo_id, "local_dir": local_dir})
+        if boom:
+            raise RuntimeError("download exploded")
+        p = Path(local_dir)
+        p.mkdir(parents=True, exist_ok=True)
+        (p / "config.json").write_text("{}")
+        (p / "model.safetensors").write_bytes(b"\x00")
+        if complete:
+            (p / "tokenizer.json").write_text("{}")
+        return str(p)
+
+    return _snap, calls
+
+
+@pytest.fixture
+def hf_repo_set(monkeypatch, tmp_path):
+    """No override/cache; HF-repo download enabled with an explicit repo id."""
+    monkeypatch.delenv("ML_SIGLIP2_MLX_PATH", raising=False)
+    monkeypatch.delenv("ML_SIGLIP2_AUTO_CONVERT", raising=False)
+    monkeypatch.setenv("ML_SIGLIP2_HF_REPO", "acme/siglip2-so400m-patch16-384")
+    monkeypatch.setenv("ML_MODEL_CACHE_DIR", str(tmp_path))
+    return tmp_path
+
+
+def test_ensure_downloads_pre_converted_before_converting(hf_repo_set, monkeypatch):
+    cache = hf_repo_set / "siglip2-so400m-patch16-384"
+    snap, dl_calls = _fake_snapshot()
+    conv, conv_calls = _fake_convert()
+    monkeypatch.setattr("huggingface_hub.snapshot_download", snap)
+    _patch_convert(monkeypatch, conv)
+
+    path, source = ensure_siglip2_source(REPO)
+    assert (source, path) == ("cache", str(cache))
+    assert dl_calls == [
+        {"repo_id": "acme/siglip2-so400m-patch16-384", "local_dir": str(cache)}
+    ]
+    assert conv_calls == [], "download succeeded, so no local convert"
+
+
+def test_ensure_default_hf_repo_is_ours(monkeypatch, tmp_path):
+    """With nothing set, the download step targets our published repo."""
+    monkeypatch.delenv("ML_SIGLIP2_MLX_PATH", raising=False)
+    monkeypatch.delenv("ML_SIGLIP2_HF_REPO", raising=False)
+    monkeypatch.setenv("ML_MODEL_CACHE_DIR", str(tmp_path))
+    snap, dl_calls = _fake_snapshot()
+    monkeypatch.setattr("huggingface_hub.snapshot_download", snap)
+    path, source = ensure_siglip2_source(REPO)
+    assert source == "cache"
+    assert dl_calls[0]["repo_id"] == "mmmorks/siglip2-so400m-patch16-384"
+
+
+def test_ensure_skips_download_when_repo_blank(monkeypatch, tmp_path):
+    """ML_SIGLIP2_HF_REPO='' disables the download step -> straight to convert."""
+    monkeypatch.delenv("ML_SIGLIP2_MLX_PATH", raising=False)
+    monkeypatch.setenv("ML_SIGLIP2_HF_REPO", "")
+    monkeypatch.setenv("ML_MODEL_CACHE_DIR", str(tmp_path))
+    snap, dl_calls = _fake_snapshot()
+    conv, conv_calls = _fake_convert()
+    monkeypatch.setattr("huggingface_hub.snapshot_download", snap)
+    _patch_convert(monkeypatch, conv)
+    path, source = ensure_siglip2_source(REPO)
+    assert source == "cache"
+    assert dl_calls == [], "blank repo must skip the download step"
+    assert len(conv_calls) == 1, "fell through to local convert"
+
+
+def test_ensure_converts_when_download_fails(hf_repo_set, monkeypatch):
+    snap, dl_calls = _fake_snapshot(boom=True)
+    conv, conv_calls = _fake_convert()
+    monkeypatch.setattr("huggingface_hub.snapshot_download", snap)
+    _patch_convert(monkeypatch, conv)
+    path, source = ensure_siglip2_source(REPO)
+    assert source == "cache"
+    assert len(dl_calls) == 1, "download was attempted"
+    assert len(conv_calls) == 1, "then fell through to local convert"
+
+
+def test_ensure_converts_when_download_incomplete(hf_repo_set, monkeypatch):
+    snap, dl_calls = _fake_snapshot(complete=False)  # no tokenizer.json
+    conv, conv_calls = _fake_convert()
+    monkeypatch.setattr("huggingface_hub.snapshot_download", snap)
+    _patch_convert(monkeypatch, conv)
+    path, source = ensure_siglip2_source(REPO)
+    assert source == "cache"
+    assert len(conv_calls) == 1, "incomplete download -> local convert"
+
+
+def test_ensure_hf_bf16_when_download_fails_and_convert_disabled(hf_repo_set, monkeypatch):
+    monkeypatch.setenv("ML_SIGLIP2_AUTO_CONVERT", "0")
+    snap, dl_calls = _fake_snapshot(boom=True)
+    monkeypatch.setattr("huggingface_hub.snapshot_download", snap)
+    path, source = ensure_siglip2_source(REPO)
+    assert (source, path) == ("hf", REPO)
+    assert len(dl_calls) == 1

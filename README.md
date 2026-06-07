@@ -167,29 +167,41 @@ interchangeable with the index Immich already built, so **no re-index is needed*
 - **Verified end-to-end** against a live Immich smart-search workload: 1152-dim,
   `L2 == 1.0`, warm latency ~50 ms text / ~110 ms image.
 
-**Weight loading & caching.** The accelerator prefers a local fp16 convert
-(~2.2 GB vs 4.3 GB bf16) and creates one on demand the first time none exists, so
-no setup is required and later loads are smaller/faster. Resolution order is:
+**Weight loading & caching.** The accelerator prefers a local fp16 cache
+(~2.2 GB vs 4.3 GB bf16) and materializes one the first time none exists, so no
+setup is required and later loads are smaller/faster. Resolution order is:
 
 1. `ML_SIGLIP2_MLX_PATH` — explicit pre-converted dir (highest precedence).
 2. The local cache dir (`models/siglip2-so400m-patch16-384`, or
    `$ML_MODEL_CACHE_DIR/...`) if a complete convert exists there.
-3. **On-demand convert** — if neither of the above is present, a one-time fp16
-   convert runs into the local cache dir, then loads from it (`source=cache`).
-4. The HF repo bf16 safetensors — fallback if the convert is disabled or fails.
+3. **Pre-converted HF download** — snapshot a published fp16 repo
+   (`ML_SIGLIP2_HF_REPO`, default `mmmorks/siglip2-so400m-patch16-384`) into the
+   local cache dir, then load it (`source=cache`). Fast — no local convert.
+4. **On-demand convert** — if the download is disabled/unavailable, a one-time
+   fp16 convert runs into the local cache dir, then loads from it (`source=cache`).
+5. The HF repo bf16 safetensors — fallback if both of the above are off/fail.
 
-The on-demand convert adds a one-time stall to the first SigLIP2 load on a clean
-install (it writes ~2.2 GB). Set `ML_SIGLIP2_AUTO_CONVERT=0` to skip it and load
-the HF bf16 weights directly instead. You can also pre-convert explicitly (e.g.
-to do it ahead of first traffic, or to `--verify`):
+Steps 3–4 each run once per machine, then every later load is `source=cache`.
+Control them with:
+
+- `ML_SIGLIP2_HF_REPO` — pre-converted fp16 repo to snapshot (default
+  `mmmorks/siglip2-so400m-patch16-384`); set empty to skip the download step.
+- `ML_SIGLIP2_AUTO_CONVERT=0` — skip the local convert (~2.2 GB write); load HF
+  bf16 directly instead.
+
+You can also pre-convert explicitly (e.g. ahead of first traffic, or to
+`--verify`), optionally publishing the result so other machines hit step 3:
 
 ```bash
 .venv/bin/python scripts/convert_siglip2_mlx.py --verify
+.venv/bin/python scripts/convert_siglip2_mlx.py \
+    --upload-repo mmmorks/siglip2-so400m-patch16-384   # publish for step 3
 ```
 
 Any local weights directory name **must** contain a `patchNN-NNN` token (e.g.
 `patch16-384`), because the mlx-embeddings loader regex-parses the patch size
-from the path; both the convert script and the on-demand path enforce this.
+from the path; the convert script, the download step, and the on-demand convert
+all enforce/preserve this.
 
 **Quantization — why the default stays fp16.** We evaluated 8-bit and 4-bit
 weight quantization for speed/memory vs accuracy

@@ -144,53 +144,109 @@ def _siglip2_auto_convert_enabled() -> bool:
     )
 
 
-def ensure_siglip2_source(repo_id: str) -> tuple[str, str]:
-    """Resolve the SigLIP2 weights source, converting on demand if needed (ml-u2d).
+def _siglip2_hf_repo() -> str:
+    """Pre-converted fp16 SigLIP2 repo to snapshot before converting locally.
 
-    Like :func:`resolve_siglip2_source`, but when resolution would fall through to
-    the HF bf16 repo (no override, no complete local cache) and auto-convert is
-    enabled, run a one-time fp16 convert into the local cache dir and load from
-    there (``source='cache'``). The convert is heavy (~2.2 GB write), so it only
-    runs when nothing local exists. Any failure — a missing 'patchNN-NNN' token in
-    the cache dir name (the loader regex needs it), a convert error, or an
-    incomplete result — logs and falls back to the HF repo so a load never breaks.
+    Defaults to our published convert; set ``ML_SIGLIP2_HF_REPO=`` (empty) to
+    disable the download step and convert locally instead.
+    """
+    return os.getenv(
+        "ML_SIGLIP2_HF_REPO", "mmmorks/siglip2-so400m-patch16-384"
+    ).strip()
+
+
+def _download_siglip2_repo(hf_repo: str, out: Path) -> bool:
+    """Snapshot a pre-converted fp16 SigLIP2 repo into the local cache dir.
+
+    Returns True iff the snapshot leaves ``out`` a complete cache. Raises on a
+    download error so the caller can treat it as "not available" and fall through.
+    """
+    from huggingface_hub import snapshot_download
+
+    out.mkdir(parents=True, exist_ok=True)
+    snapshot_download(repo_id=hf_repo, local_dir=str(out))
+    return siglip2_dir_is_complete(out)
+
+
+def _convert_siglip2(repo_id: str, out: Path) -> bool:
+    """Convert the HF bf16 ``repo_id`` to fp16 in ``out``. True iff complete."""
+    from mlx_embeddings.convert import convert
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+    convert(hf_path=repo_id, mlx_path=str(out), dtype="float16")
+    return siglip2_dir_is_complete(out)
+
+
+def ensure_siglip2_source(repo_id: str) -> tuple[str, str]:
+    """Resolve the SigLIP2 weights source, materializing a local fp16 cache if needed.
+
+    Resolution order (ml-u2d / ml-ivw):
+
+    1. ``ML_SIGLIP2_MLX_PATH`` override, or a complete local cache
+       (:func:`resolve_siglip2_source`).
+    2. Snapshot a pre-converted fp16 repo (``ML_SIGLIP2_HF_REPO``, default
+       ``mmmorks/...``) into the local cache dir — fast, no local convert.
+    3. On-demand fp16 convert of the HF bf16 repo into the cache dir
+       (``ML_SIGLIP2_AUTO_CONVERT``, default on; ~2.2 GB write).
+    4. The HF bf16 repo id itself (loaded + cached by HF) as a last resort.
+
+    Steps 2 and 3 both yield ``source='cache'``. Any failure at a step logs and
+    falls through to the next, so a load never breaks.
     """
     path_or_repo, source = resolve_siglip2_source(repo_id)
-    if source != "hf" or not _siglip2_auto_convert_enabled():
+    if source != "hf":
         return path_or_repo, source
 
     out = siglip2_cache_dir(repo_id)
+    # The loader regex parses patch size from the dir path, so the local cache
+    # dir name must carry a 'patchNN-NNN' token; without it, skip local
+    # materialization entirely and load the HF bf16 repo.
     if not re.search(r"patch\d+-\d+", out.name):
         logger.warning(
-            f"Skipping on-demand SigLIP2 convert: cache dir name {out.name!r} "
-            "lacks a 'patchNN-NNN' token the loader regex needs; loading HF bf16"
+            f"Cache dir name {out.name!r} lacks a 'patchNN-NNN' token the loader "
+            "regex needs; loading HF bf16 instead of materializing a local cache"
         )
         return repo_id, "hf"
 
-    logger.info(
-        f"No local SigLIP2 convert found; converting {repo_id} -> {out} once "
-        "(fp16, ~2.2 GB; set ML_SIGLIP2_AUTO_CONVERT=0 to load HF bf16 instead)"
-    )
-    try:
-        from mlx_embeddings.convert import convert
-
-        out.parent.mkdir(parents=True, exist_ok=True)
-        convert(hf_path=repo_id, mlx_path=str(out), dtype="float16")
-    except Exception as e:
-        logger.warning(
-            f"On-demand SigLIP2 convert failed ({e}); loading HF bf16 instead",
-            exc_info=True,
+    # 2. Pre-converted fp16 repo download.
+    hf_repo = _siglip2_hf_repo()
+    if hf_repo:
+        logger.info(
+            f"Fetching pre-converted SigLIP2 fp16 weights {hf_repo} -> {out}"
         )
-        return repo_id, "hf"
+        try:
+            if _download_siglip2_repo(hf_repo, out):
+                logger.info(
+                    f"Loaded pre-converted SigLIP2 from {hf_repo} -> {out}"
+                )
+                return str(out), "cache"
+            logger.warning(
+                f"Downloaded {hf_repo} but {out} is incomplete; trying local convert"
+            )
+        except Exception as e:
+            logger.warning(
+                f"Pre-converted SigLIP2 download from {hf_repo} failed ({e}); "
+                "trying local convert",
+                exc_info=True,
+            )
 
-    if not siglip2_dir_is_complete(out):
-        logger.warning(
-            f"On-demand SigLIP2 convert left {out} incomplete; loading HF bf16"
+    # 3. On-demand local convert.
+    if _siglip2_auto_convert_enabled():
+        logger.info(
+            f"Converting SigLIP2 {repo_id} -> {out} once "
+            "(fp16, ~2.2 GB; set ML_SIGLIP2_AUTO_CONVERT=0 to load HF bf16)"
         )
-        return repo_id, "hf"
+        try:
+            if _convert_siglip2(repo_id, out):
+                logger.info(f"On-demand SigLIP2 convert complete -> {out}")
+                return str(out), "cache"
+            logger.warning(f"On-demand SigLIP2 convert left {out} incomplete")
+        except Exception as e:
+            logger.warning(f"On-demand SigLIP2 convert failed ({e})", exc_info=True)
 
-    logger.info(f"On-demand SigLIP2 convert complete -> {out}")
-    return str(out), "cache"
+    # 4. Last resort: HF bf16.
+    logger.warning(f"Falling back to HF bf16 for SigLIP2: {repo_id}")
+    return repo_id, "hf"
 
 
 # open_clip model name mappings for fallback
