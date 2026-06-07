@@ -277,6 +277,56 @@ manually if you want to run it.
 - `buffalo_m`
 - `buffalo_l` - **default**
 
+### Face-embedding parity (preserve vs re-scan)
+
+Face **recognition** is the same upstream model and metric: InsightFace
+`buffalo_l` ArcFace (`w600k_r50`), the same `face_align.norm_crop` 112×112
+alignment, and cosine search. The one thing this fork changes is **detection +
+5-point landmarks** — upstream Immich uses the `buffalo_l` SCRFD detector
+(`det_10g.onnx`; the "RetinaFace" in old notes), which emits keypoints directly,
+while this fork reconstructs the 5 points from Apple Vision face-landmark
+contours (`src/models/face_detect.py`). Different landmarks → a slightly
+different aligned crop → a drifted embedding for the *same* face, so face-index
+compatibility had to be measured, not assumed.
+
+`scripts/face_embedding_parity.py` runs both detectors over a labelled face set,
+matches each physical face by bounding-box IoU, and routes **both** keypoint sets
+through the production `src/models/face_embed.py` so landmarks are the only
+variable. On a 40-identity / 287-matched-face LFW sample:
+
+| metric | result |
+|---|---|
+| alignment-drift cosine (upstream-kps vs Vision-kps, identical ArcFace) | median **0.980**, p5 0.959, p1 0.941, min 0.858 |
+| faces with drift cosine ≥ 0.90 / ≥ 0.95 | **99.3% / 97.9%** |
+| top-1 identity: upstream→upstream / fork→fork / **fork→upstream (preserve test)** | 0.951 / 0.951 / **0.951 (zero drop)** |
+| detection coverage: Vision recall vs SCRFD | **0.854** (Vision missed 49 of 336; found 1 extra) |
+
+**Recommendation: PRESERVE the existing face index and clusters — a re-scan is
+not required for embedding compatibility.** A face stored in the index (embedded
+via upstream landmarks) and re-detected by this fork lands at cosine ≈0.98 of its
+stored vector, and fork-detected query faces retrieve the correct identity from a
+stored-upstream index with **no measurable accuracy drop**. New faces join the
+right clusters.
+
+Two caveats, both about *detection coverage* rather than embedding drift:
+
+- Apple Vision detects a **different set** of faces than SCRFD (~85% recall on
+  this frontal set; profiles, small, or occluded faces in a real library will
+  diverge more). Going forward some faces Docker would have indexed may not be
+  re-detected (and vice versa) — this changes which faces exist, not whether the
+  embeddings of detected faces are compatible.
+- Vision confidence is **not** calibrated like SCRFD's `det_score`, so
+  `ML_FACE_MIN_SCORE=0.7` is not the same operating point as Docker's threshold
+  (on clean LFW faces every Vision detection scored ≥0.7).
+
+LFW is clean, frontal, near-best-case data. To validate against your own library,
+re-run on real photos (one `identity/*.jpg` subdir per person for the top-1
+metric):
+
+```bash
+.venv/bin/python scripts/face_embedding_parity.py --images ~/face-samples --report face_parity.md
+```
+
 ## Connecting to Immich
 
 In your Immich `docker-compose.yml` or `.env`:
