@@ -555,6 +555,17 @@ _current_model_name: Optional[str] = None
 _model_lock = threading.Lock()
 
 
+def get_loaded_clip_model_name() -> Optional[str]:
+    """Name of the currently-loaded CLIP model, or None if none is loaded.
+
+    Lets callers reuse the live model instead of forcing a switch to a configured
+    default. The /health probe uses this so it never evicts the production model
+    from the single CLIP slot (settings.clip_model can differ from what Immich
+    actually requests).
+    """
+    return _current_model_name
+
+
 def get_clip_model(model_name: str = "ViT-B-32__openai") -> MLXClip:
     """
     Get CLIP model, loading or switching as needed (thread-safe).

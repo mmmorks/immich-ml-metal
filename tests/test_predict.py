@@ -80,6 +80,64 @@ async def test_health_hides_error_details_without_debug(client, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_health_reuses_loaded_clip_model(client, monkeypatch):
+    """ml-atc: /health must probe the already-loaded CLIP model, not switch to
+    settings.clip_model — otherwise it evicts the production model (e.g. SigLIP2)
+    from the single CLIP slot on every probe and thrashes the cache."""
+    import src.main as main
+    import src.models.clip as clip_module
+    import src.models.face_embed as face_module
+
+    monkeypatch.setattr(main, "STUB_MODE", False)
+    # Pretend SigLIP2 is the live production model in the single CLIP slot.
+    LIVE = "ViT-SO400M-16-SigLIP2-384__webli"
+    monkeypatch.setattr(clip_module, "_current_model_name", LIVE)
+    monkeypatch.setattr(main.settings, "clip_model", "ViT-B-32__openai")
+
+    # Record what model name the CLIP check actually requests.
+    called = {}
+
+    def _record_get_clip(model_name="ViT-B-32__openai"):
+        called["name"] = model_name
+        return object()
+
+    monkeypatch.setattr(main, "get_clip", _record_get_clip)
+    # Neutralize the unrelated sub-checks so they don't load real models.
+    monkeypatch.setattr(face_module, "get_recognition_model", lambda *a, **k: object())
+
+    resp = await client.get("/health")
+    assert resp.status_code == 200
+    assert called["name"] == LIVE, (
+        "health probed settings.clip_model instead of the loaded model — "
+        "this evicts the production model"
+    )
+
+
+@pytest.mark.asyncio
+async def test_health_falls_back_to_settings_when_nothing_loaded(client, monkeypatch):
+    """With no CLIP model loaded yet, /health probes settings.clip_model."""
+    import src.main as main
+    import src.models.clip as clip_module
+    import src.models.face_embed as face_module
+
+    monkeypatch.setattr(main, "STUB_MODE", False)
+    monkeypatch.setattr(clip_module, "_current_model_name", None)
+    monkeypatch.setattr(main.settings, "clip_model", "ViT-B-32__openai")
+
+    called = {}
+
+    def _record_get_clip(model_name="ViT-B-32__openai"):
+        called["name"] = model_name
+        return object()
+
+    monkeypatch.setattr(main, "get_clip", _record_get_clip)
+    monkeypatch.setattr(face_module, "get_recognition_model", lambda *a, **k: object())
+
+    await client.get("/health")
+    assert called["name"] == "ViT-B-32__openai"
+
+
+@pytest.mark.asyncio
 async def test_health_exposes_error_details_with_debug(client, monkeypatch):
     """With debug_mode on, the raw exception string is allowed through for diagnostics."""
     import src.main as main

@@ -221,6 +221,14 @@ def test_get_clip_model_switches_and_unloads(stub_clip):
     assert len(stub_clip.instances) == 2
 
 
+def test_get_loaded_clip_model_name_tracks_current(stub_clip):
+    from src.models.clip import get_loaded_clip_model_name
+
+    assert get_loaded_clip_model_name() is None, "no model loaded yet"
+    get_clip_model(SIGLIP2_NAME)
+    assert get_loaded_clip_model_name() == SIGLIP2_NAME
+
+
 # --- Optional end-to-end integration against a running ML service -------------
 #
 # Opt in by pointing ML_SERVICE_URL at a reachable instance, e.g.:

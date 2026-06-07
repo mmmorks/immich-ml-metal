@@ -379,9 +379,15 @@ async def health():
 
     try:
         if not STUB_MODE:
-            # Check CLIP model
+            # Check CLIP model. Reuse the already-loaded model if any, so the
+            # probe never evicts the production model from the single CLIP slot.
+            # settings.clip_model defaults to ViT-B-32__openai, which may differ
+            # from the model Immich actually requests (e.g. SigLIP2) — probing the
+            # default would force a switch and thrash the cache on every health hit.
             try:
-                get_clip(settings.clip_model)
+                from .models.clip import get_loaded_clip_model_name
+
+                get_clip(get_loaded_clip_model_name() or settings.clip_model)
                 _track_model_use("clip")
                 health_status["checks"]["clip"] = "ok"
             except Exception as e:
