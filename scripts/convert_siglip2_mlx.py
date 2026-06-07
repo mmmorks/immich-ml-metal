@@ -47,6 +47,24 @@ DEFAULT_HF_REPO = MLX_EMBEDDINGS_MAP["ViT-SO400M-16-SigLIP2-384__webli"]
 _PATCH_TOKEN = re.compile(r"patch\d+-\d+")
 
 
+def _require_patch_token(value: str, flag: str) -> None:
+    """Raise ValueError if ``value`` lacks a 'patchNN-NNN' token (ml-ycd.1).
+
+    The mlx-embeddings loader regex-parses the patch/image size from the path or
+    repo-id string (config.json omits patch_size), so both the local --mlx-path
+    dir name and the --upload-repo name must carry the token or load() crashes —
+    for the upload repo, on every consumer that pulls it. A trailing precision
+    suffix (e.g. '-4bit') is fine: the loader's image-size regex is
+    ``patch\\d+-(\\d+)(?:-|$)``.
+    """
+    if not _PATCH_TOKEN.search(value):
+        raise ValueError(
+            f"{flag} {value!r} lacks a 'patchNN-NNN' token; the mlx-embeddings "
+            "loader regex-parses the patch size from the path and will crash. "
+            "Use e.g. '.../siglip2-so400m-patch16-384'."
+        )
+
+
 def _verify_load(path: Path) -> None:
     """Load the converted dir and run a tiny image+text encode as a smoke test.
 
@@ -128,13 +146,15 @@ def main() -> int:
 
     out = Path(args.mlx_path) if args.mlx_path else siglip2_cache_dir(DEFAULT_HF_REPO)
 
-    # Fail fast on the one mistake that crashes the loader later (ml-ycd.1).
-    if not _PATCH_TOKEN.search(out.name):
-        ap.error(
-            f"--mlx-path dir name {out.name!r} lacks a 'patchNN-NNN' token; the "
-            "mlx-embeddings loader regex-parses the patch size from the path and "
-            "will crash. Use e.g. '.../siglip2-so400m-patch16-384'."
-        )
+    # Fail fast on the one mistake that crashes the loader later (ml-ycd.1) — for
+    # the local dir AND, if publishing, the upload repo (which would crash every
+    # consumer that pulls it).
+    try:
+        _require_patch_token(out.name, "--mlx-path dir name")
+        if args.upload_repo:
+            _require_patch_token(args.upload_repo, "--upload-repo")
+    except ValueError as e:
+        ap.error(str(e))
 
     if siglip2_dir_is_complete(out) and not args.force:
         print(f"[skip] complete convert already at {out} (use --force to redo)")
