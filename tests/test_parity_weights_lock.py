@@ -67,6 +67,30 @@ def test_verify_digest_rejects_missing_file(tmp_path):
         mod.verify_digest(tmp_path / "absent.bin", "0" * 64)
 
 
+def test_lock_agrees_with_service_weight_pins():
+    """The CI lock and the service's runtime pins must not silently diverge.
+
+    The service (src/models/weight_pins.py) pins SigLIP2 + ArcFace by revision +
+    sha256 for its own runtime verification; the CI lock pins the same sources so
+    the parity job can pre-stage them. They are two representations of the same
+    bytes — if someone rolls one pin without the other, the gate could run
+    against different weights than production. Assert they match so that can't
+    happen quietly. (The OpenAI-CLIP port lives only in the CI lock: the service
+    converts it unpinned, which the lock + the gate's refs/main pin cover.)
+    """
+    from src.models import weight_pins
+
+    sources = json.loads(LOCK_PATH.read_text())["sources"]
+
+    sig = sources["siglip2"]
+    assert sig["repo"] == weight_pins.SIGLIP2_PINNED_REPO
+    assert sig["revision"] == weight_pins.SIGLIP2_PINNED_REVISION
+    assert sig["sha256"] == weight_pins.SIGLIP2_PINNED_SHA256[sig["verify_file"]]
+
+    buf = sources["buffalo_l"]
+    assert buf["sha256"] == weight_pins.ARCFACE_PINNED_SHA256[buf["pack"]][buf["verify_file"]]
+
+
 @pytest.mark.parametrize("name", list(json.loads(LOCK_PATH.read_text())["sources"]))
 def test_pinned_digest_matches_local_weights_if_present(name):
     """If the real weight is already cached locally, its bytes must match the pin.
