@@ -5,8 +5,11 @@
     "the gate actually consumes, so an upstream re-publish cannot silently shift",
     "embeddings underneath the parity assertions. ci/fetch_parity_weights.py",
     "downloads at the pinned revision and fails the build on any digest mismatch.",
-    "Hosting these as our own artifacts (removing the HuggingFace dependency) is",
-    "tracked separately; this file pins against the current upstream sources.",
+    "Weights stay upstream-hosted (HuggingFace/InsightFace) on purpose: the CI",
+    "parity job caches them in the GitHub Actions runner cache (keyed on this",
+    "lock), so a warm run does no upstream fetch, and the revision+sha256 pins",
+    "make a re-publish a loud failure rather than silent drift. A self-hosted",
+    "mirror was considered and rejected as not worth the infra for those gains.",
     "To roll a pin: update revision + sha256 here, regenerate the committed ONNX",
     "goldens (scripts/gen_parity_golden.py), and confirm the gate still passes."
   ],
