@@ -75,6 +75,10 @@ MODEL_MAP = {
 # crashes. mlx-embeddings loads the HF bf16 safetensors directly, so no
 # separate conversion step is required (ml-ycd.7 productionizes caching).
 # See the ml-ycd.1 spike writeup for the full rationale.
+#
+# This stays the *original bf16* repo on purpose: it is the on-demand convert
+# source and the last-resort direct-load fallback. The pre-converted *fp16*
+# download home is separate — `_siglip2_hf_repo()`, now mlx-community (ml-5t0).
 MLX_EMBEDDINGS_MAP = {
     "ViT-SO400M-16-SigLIP2-384__webli": "google/siglip2-so400m-patch16-384",
 }
@@ -162,11 +166,16 @@ def _siglip2_auto_convert_enabled() -> bool:
 def _siglip2_hf_repo() -> str:
     """Pre-converted fp16 SigLIP2 repo to snapshot before converting locally.
 
-    Defaults to our published convert; set ``ML_SIGLIP2_HF_REPO=`` (empty) to
-    disable the download step and convert locally instead.
+    Defaults to the canonical ``mlx-community`` convert (ml-yo9) — the same fp16
+    bytes as the original ``mmmorks/...`` publish, but in the community org so
+    installs pull from an upstream home. NOTE this is the fp16 *download* source,
+    NOT ``MLX_EMBEDDINGS_MAP`` (which stays ``google/...``: it is the bf16
+    *convert* source / last-resort load, and re-converting our own fp16 is
+    untested). Set ``ML_SIGLIP2_HF_REPO=`` (empty) to disable the download step
+    and convert the bf16 source locally instead.
     """
     return os.getenv(
-        "ML_SIGLIP2_HF_REPO", "mmmorks/siglip2-so400m-patch16-384"
+        "ML_SIGLIP2_HF_REPO", "mlx-community/siglip2-so400m-patch16-384"
     ).strip()
 
 
@@ -200,7 +209,7 @@ def ensure_siglip2_source(repo_id: str) -> tuple[str, str]:
     1. ``ML_SIGLIP2_MLX_PATH`` override, or a complete local cache
        (:func:`resolve_siglip2_source`).
     2. Snapshot a pre-converted fp16 repo (``ML_SIGLIP2_HF_REPO``, default
-       ``mmmorks/...``) into the local cache dir — fast, no local convert.
+       ``mlx-community/...``) into the local cache dir — fast, no local convert.
     3. On-demand fp16 convert of the HF bf16 repo into the cache dir
        (``ML_SIGLIP2_AUTO_CONVERT``, default on; ~2.2 GB write).
     4. The HF bf16 repo id itself (loaded + cached by HF) as a last resort.

@@ -284,7 +284,7 @@ def test_ensure_downloads_pre_converted_before_converting(hf_repo_set, monkeypat
 
 
 def test_ensure_default_hf_repo_is_ours(monkeypatch, tmp_path):
-    """With nothing set, the download step targets our published repo."""
+    """With nothing set, the download step targets the canonical mlx-community repo."""
     monkeypatch.delenv("ML_SIGLIP2_MLX_PATH", raising=False)
     monkeypatch.delenv("ML_SIGLIP2_HF_REPO", raising=False)
     monkeypatch.setenv("ML_MODEL_CACHE_DIR", str(tmp_path))
@@ -292,7 +292,7 @@ def test_ensure_default_hf_repo_is_ours(monkeypatch, tmp_path):
     monkeypatch.setattr("huggingface_hub.snapshot_download", snap)
     path, source = ensure_siglip2_source(REPO)
     assert source == "cache"
-    assert dl_calls[0]["repo_id"] == "mmmorks/siglip2-so400m-patch16-384"
+    assert dl_calls[0]["repo_id"] == "mlx-community/siglip2-so400m-patch16-384"
 
 
 def test_ensure_skips_download_when_repo_blank(monkeypatch, tmp_path):
