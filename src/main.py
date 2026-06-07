@@ -207,7 +207,7 @@ class FaceDetection(BaseModel):
 
 class OCRResult(BaseModel):
     text: list[str]
-    box: list[int]  # Flat list of coordinates
+    box: list[float]  # Flat list of normalized [0,1] quad coordinates (8 per region)
     boxScore: list[float]
     textScore: list[float]
 
@@ -615,23 +615,25 @@ async def _process_predict(
                 "ocr",
                 {
                     "text": ["placeholder", "text"],
+                    # Normalized [0,1] 8-coord quads (TL,TR,BR,BL) matching the
+                    # real OCR contract: two regions stacked in the upper/lower half.
                     "box": [
-                        0,
-                        0,
-                        100,
-                        0,
-                        100,
-                        50,
-                        0,
-                        50,
-                        0,
-                        50,
-                        100,
-                        50,
-                        100,
-                        100,
-                        0,
-                        100,
+                        0.0,
+                        0.0,
+                        1.0,
+                        0.0,
+                        1.0,
+                        0.5,
+                        0.0,
+                        0.5,
+                        0.0,
+                        0.5,
+                        1.0,
+                        0.5,
+                        1.0,
+                        1.0,
+                        0.0,
+                        1.0,
                     ],
                     "boxScore": [0.95, 0.92],
                     "textScore": [0.98, 0.96],

@@ -21,25 +21,44 @@ def normalized_bbox_to_box(
     height: float,
     img_width: int,
     img_height: int,
-) -> list[int]:
+) -> list[float]:
     """Convert a Vision bounding box to Immich's 8-coordinate quadrilateral.
 
     Vision returns normalized coordinates with the origin at the bottom-left,
-    so the Y axis is flipped to Immich's top-left-origin pixel space. The
-    result is the four corners (as ints) ordered clockwise starting top-left:
-    ``[x1, y1, x2, y2, x3, y3, x4, y4]`` = TL, TR, BR, BL.
+    so the Y axis is flipped to Immich's top-left origin. The output matches
+    upstream immich_ml's OCR contract: coordinates are floats normalized to
+    ``[0, 1]`` (pixel coord / image dimension), with the four corners ordered
+    clockwise starting top-left:
+    ``[x1, y1, x2, y2, x3, y3, x4, y4]`` = TL, TR, BR, BL. A full-frame region
+    maps to ``[0, 0, 1, 0, 1, 1, 0, 1]``.
+
+    ``img_width``/``img_height`` keep the derivation explicit (pixel coord /
+    image dimension); Vision's coords are already normalized so the scale
+    cancels, but mirroring upstream's pixel-then-divide path keeps the contract
+    obvious. Note that Vision only exposes an axis-aligned bounding box, so the
+    quad is always a rectangle — rotated text quadrilaterals (which PaddleOCR
+    returns) cannot be represented (see README "Known differences").
     """
     x = origin_x * img_width
     y = (1.0 - origin_y - height) * img_height
     w = width * img_width
     h = height * img_height
 
-    x1, y1 = int(x), int(y)  # top-left
-    x2, y2 = int(x + w), int(y)  # top-right
-    x3, y3 = int(x + w), int(y + h)  # bottom-right
-    x4, y4 = int(x), int(y + h)  # bottom-left
+    x1, y1 = x, y  # top-left
+    x2, y2 = x + w, y  # top-right
+    x3, y3 = x + w, y + h  # bottom-right
+    x4, y4 = x, y + h  # bottom-left
 
-    return [x1, y1, x2, y2, x3, y3, x4, y4]
+    return [
+        x1 / img_width,
+        y1 / img_height,
+        x2 / img_width,
+        y2 / img_height,
+        x3 / img_width,
+        y3 / img_height,
+        x4 / img_width,
+        y4 / img_height,
+    ]
 
 
 def recognize_text(image_bytes: bytes, min_confidence: float = 0.0, use_language_correction: bool = True) -> dict:
@@ -59,7 +78,7 @@ def recognize_text(image_bytes: bytes, min_confidence: float = 0.0, use_language
         Dict matching Immich OCR response format:
         {
             "text": [str, ...],
-            "box": [x1, y1, x2, y2, x3, y3, x4, y4, ...],  # 8 coords per text
+            "box": [x1, y1, x2, y2, x3, y3, x4, y4, ...],  # 8 normalized [0,1] coords per text
             "boxScore": [float, ...],
             "textScore": [float, ...]
         }
@@ -190,6 +209,6 @@ if __name__ == "__main__":
         box_start = i * 8
         coords = result["box"][box_start : box_start + 8]
         logger.info(f'  [text:{text_score:.2f} box:{box_score:.2f}] "{text}"')
-        logger.info(f"         Box: {coords}")
+        logger.info(f"         Box (normalized): {[round(c, 4) for c in coords]}")
 
     logger.info("\n✅ OCR test complete!")
