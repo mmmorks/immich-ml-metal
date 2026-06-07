@@ -416,9 +416,13 @@ class MLXClip:
         when run by hand; this makes the protection automatic at load.
 
         Compares the loaded vision tower against the arch the repo id encodes
-        (patch size + base/large width). If the model structure can't be
-        introspected (a future mlx_clip restructure), warns rather than breaking
-        an otherwise-working load — the guard itself then needs maintenance.
+        (patch size + base/large width), reading mlx_clip's ACTUAL layout —
+        ``model.vision_model.embeddings.config`` (a CLIPVisionConfig with
+        patch_size/hidden_size). NOTE mlx_clip's CLIPModel has no ``.config``
+        attribute, so that path must come off the vision embeddings, not the
+        model. If the structure can't be introspected (a future mlx_clip
+        restructure), warns rather than breaking an otherwise-working load — the
+        guard itself then needs maintenance.
         """
         repo = self._repo_id
         if not repo:
@@ -426,7 +430,13 @@ class MLXClip:
         expected = _expected_vision_arch(repo)
         if not expected:
             return  # repo id doesn't encode an arch to verify against
-        vision = getattr(getattr(getattr(self._model, "model", None), "config", None), "vision_config", None)
+        # mlx_clip layout: wrapper.model (CLIPModel) -> vision_model -> embeddings
+        # -> config (CLIPVisionConfig). CLIPModel itself has NO .config, so the
+        # vision config must be reached via the embeddings. Any missing link
+        # (a future mlx_clip restructure) collapses to None -> warn-and-skip below.
+        model = getattr(self._model, "model", None)
+        embeddings = getattr(getattr(model, "vision_model", None), "embeddings", None)
+        vision = getattr(embeddings, "config", None)
         if vision is None:
             logger.warning(
                 "mlx_clip load-time guard could not introspect the vision config for "

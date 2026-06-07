@@ -467,10 +467,16 @@ import types
 
 
 def _fake_loaded_clip(patch_size, hidden_size=768):
-    """An mlx_clip-shaped stub exposing model.config.vision_config.{patch_size,hidden_size}."""
-    vision = types.SimpleNamespace(patch_size=patch_size, hidden_size=hidden_size)
-    config = types.SimpleNamespace(vision_config=vision)
-    return types.SimpleNamespace(model=types.SimpleNamespace(config=config))
+    """An mlx_clip-shaped stub exposing model.vision_model.embeddings.config.{patch_size,hidden_size}.
+
+    This is mlx_clip's REAL layout — CLIPModel has no ``.config``; the vision
+    config lives on the embeddings. _real_mlx_clip_wrapper builds the genuine
+    nn.Module to keep this stub honest (see test_guard_*_real_mlx_clip_structure).
+    """
+    vision_cfg = types.SimpleNamespace(patch_size=patch_size, hidden_size=hidden_size)
+    embeddings = types.SimpleNamespace(config=vision_cfg)
+    vision_model = types.SimpleNamespace(embeddings=embeddings)
+    return types.SimpleNamespace(model=types.SimpleNamespace(vision_model=vision_model))
 
 
 def _patch_mlx_clip_returning(monkeypatch, model):
@@ -539,7 +545,7 @@ def test_loaded_checkpoint_guard_skips_when_unintrospectable(monkeypatch, caplog
     """If a future mlx_clip restructures so the vision config can't be found, the
     guard must NOT break a working load — it warns (so the guard gets maintained)
     rather than crashing on a model it can't inspect."""
-    _patch_mlx_clip_returning(monkeypatch, object())  # no .model.config.vision_config
+    _patch_mlx_clip_returning(monkeypatch, object())  # no .model.vision_model.embeddings.config
     clip = _bare_for_load("ViT-B-16__openai")
     import logging
 
@@ -547,6 +553,55 @@ def test_loaded_checkpoint_guard_skips_when_unintrospectable(monkeypatch, caplog
         clip._load_model()
     assert clip._loaded is True
     assert any("guard" in r.message.lower() for r in caplog.records), "should warn it could not verify"
+
+
+# Regression: the guard must read mlx_clip's REAL attribute layout, not a stub's.
+# A real CLIPModel exposes its vision params at model.vision_model.embeddings.config
+# and has NO model.config — so a guard reading model.config silently never fires in
+# production, however green the stub-based tests look. Building the real nn.Module
+# (cheap; no safetensors) pins the path to reality so stub drift can't hide the bug.
+
+
+def _real_mlx_clip_wrapper(patch_size, hidden_size):
+    """A wrapper whose ``.model`` is a REAL mlx_clip CLIPModel (no weights).
+
+    Tiny dims keep construction fast — the guard only reads the vision config, so
+    layer counts/widths beyond what it checks are irrelevant. Mirrors how _load_model
+    sees ``self._model`` (the mlx_clip wrapper) with ``.model`` the CLIPModel.
+    """
+    from mlx_clip.model import CLIPConfig, CLIPModel, CLIPTextConfig, CLIPVisionConfig
+
+    tc = CLIPTextConfig(
+        num_hidden_layers=1, hidden_size=64, intermediate_size=128,
+        num_attention_heads=1, max_position_embeddings=77, vocab_size=49408, layer_norm_eps=1e-5,
+    )
+    vc = CLIPVisionConfig(
+        num_hidden_layers=1, hidden_size=hidden_size, intermediate_size=128,
+        num_attention_heads=1, num_channels=3, image_size=224, patch_size=patch_size, layer_norm_eps=1e-5,
+    )
+    real = CLIPModel(CLIPConfig(text_config=tc, vision_config=vc, projection_dim=64))
+    return types.SimpleNamespace(model=real)
+
+
+def test_guard_fires_against_real_mlx_clip_structure(monkeypatch):
+    """The decisive regression: against a REAL CLIPModel, requesting L-14 (patch14)
+    while mlx_clip hands back a B-16-shaped model (patch16) must raise. A guard that
+    reads the non-existent model.config would skip here and silently never fire."""
+    _patch_mlx_clip_returning(monkeypatch, _real_mlx_clip_wrapper(patch_size=16, hidden_size=768))
+    clip = _bare_for_load("ViT-L-14__openai")
+    with pytest.raises(RuntimeError) as ei:
+        clip._load_model()
+    assert "patch_size" in str(ei.value), "must catch the patch mismatch via the real model layout"
+    assert getattr(clip, "_loaded", False) is not True
+
+
+def test_guard_passes_against_real_mlx_clip_structure(monkeypatch):
+    """Happy path against the REAL structure: a correctly-shaped real model loads
+    without the guard raising (proves the fixed path reads, not just skips)."""
+    _patch_mlx_clip_returning(monkeypatch, _real_mlx_clip_wrapper(patch_size=16, hidden_size=768))
+    clip = _bare_for_load("ViT-B-16__openai")
+    clip._load_model()
+    assert clip._loaded is True
 
 
 # --- SigLIP2 tokenizer source resolution -------------------------------------
