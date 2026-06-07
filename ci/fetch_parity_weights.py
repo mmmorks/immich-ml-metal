@@ -69,6 +69,24 @@ def _stage_siglip2(spec: dict, check_only: bool) -> Path:
     return out / spec["verify_file"]
 
 
+def _pin_cache_main_ref(repo: str, revision: str) -> None:
+    """Point the HF cache's ``refs/main`` at the pinned commit.
+
+    The production backend converts the OpenAI-CLIP port via a default
+    ``snapshot_download(repo)`` — i.e. revision ``main`` — with no pin of its
+    own. Under ``HF_HUB_OFFLINE=1`` (set for the gate so it can't silently fetch
+    a different revision), HF resolves ``main`` through this ref file. Rewriting
+    it to the locked commit means that default download resolves to the PINNED,
+    digest-verified bytes from cache instead of failing or drifting.
+    """
+    from huggingface_hub.constants import HF_HUB_CACHE
+
+    ref = Path(HF_HUB_CACHE) / f"models--{repo.replace('/', '--')}" / "refs" / "main"
+    if ref.parent.parent.is_dir():
+        ref.parent.mkdir(parents=True, exist_ok=True)
+        ref.write_text(revision)
+
+
 def _stage_openai_clip(spec: dict, check_only: bool) -> Path:
     # Stage the source pickle at the pinned revision into the HF cache; the gated
     # test converts it to MLX lazily (torch, convert-only) on a cold cache.
@@ -80,6 +98,7 @@ def _stage_openai_clip(spec: dict, check_only: bool) -> Path:
             revision=spec["revision"],
             allow_patterns=["*.bin", "*.json", "*.txt"],
         )
+        _pin_cache_main_ref(spec["repo"], spec["revision"])
     from huggingface_hub import hf_hub_download
 
     resolved = hf_hub_download(
