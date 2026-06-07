@@ -1,0 +1,13 @@
+{
+  "model": "buffalo_l (SCRFD det_10g + ArcFace w600k_r50)",
+  "onnxruntime_version": "1.26.0",
+  "dim": 512,
+  "num_faces": 9,
+  "identities": [
+    "Aaron_Peirsol",
+    "Aaron_Sorkin",
+    "Abdel_Nasser_Assidi"
+  ],
+  "golden_top1_accuracy": 1.0,
+  "generated": "2026-06-07"
+}

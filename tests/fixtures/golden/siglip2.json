@@ -1,0 +1,33 @@
+{
+  "model": "ViT-SO400M-16-SigLIP2-384__webli",
+  "onnx_repo": "immich-app/ViT-SO400M-16-SigLIP2-384__webli",
+  "onnx_repo_commit": "19baa26af70bd3639ca0ca17d1560cb8056dd983",
+  "onnxruntime_version": "1.26.0",
+  "dim": 1152,
+  "images": [
+    "apollo17_moon.jpg",
+    "astronaut_spacewalk.jpg",
+    "earth_blue_marble.jpg",
+    "mars_curiosity.jpg",
+    "nasa_pia03883.jpg",
+    "nasa_pia12348.jpg",
+    "nasa_pia17011.jpg",
+    "nebula_hubble.jpg"
+  ],
+  "queries": [
+    "a photo of a cat",
+    "a dog playing in the park",
+    "a red sports car on a highway",
+    "a plate of food on a wooden table",
+    "a sunset over the ocean",
+    "people walking on a city street at night",
+    "a snowy mountain landscape",
+    "a child blowing out birthday candles",
+    "a laptop and a cup of coffee on a desk",
+    "a close-up of a flower with a bee",
+    "an old stone building with arched windows",
+    "a screenshot of a chat conversation"
+  ],
+  "preprocess": "siglip_image_pixels @384 + 0.5 mean/std; SiglipTextTokenizer",
+  "generated": "2026-06-07"
+}

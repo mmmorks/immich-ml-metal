@@ -23,10 +23,16 @@ Public-domain photos for CLIP image parity. Provenance per file:
 ## faces/
 LFW subset for face parity (identity subdirectories, ≥2 images each).
 Source: `logasja/lfw` (HuggingFace dataset). LFW is a research-use face
-verification benchmark; only a minimal subset is committed here.
+verification benchmark; only a minimal subset is committed here. Committed
+identities (3 × 2 images): `Aaron_Peirsol`, `Aaron_Sorkin`,
+`Abdel_Nasser_Assidi`. Selected deterministically by
+`scripts/gen_parity_golden.py --targets face` (`load_lfw`).
 
 ## golden/
 Reference embeddings frozen from the upstream ONNX models Immich ships
 (`immich-app/*` repos, insightface `buffalo_l`). Regenerate with
 `scripts/gen_parity_golden.py`. Each `.json` manifest records the ONNX repo,
 resolved commit SHA, onnxruntime version, dim, and generation date.
+
+Regenerating the `openai_clip` golden needs the open_clip tokenizer
+(`pip install open-clip-torch`); the gate tests themselves do not require it.

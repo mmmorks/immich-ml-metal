@@ -1,0 +1,33 @@
+{
+  "model": "ViT-B-32__openai",
+  "onnx_repo": "immich-app/ViT-B-32__openai",
+  "onnx_repo_commit": "a857c8de2c07bbcfa6646adfcf31b798845afa1e",
+  "onnxruntime_version": "1.26.0",
+  "dim": 512,
+  "images": [
+    "apollo17_moon.jpg",
+    "astronaut_spacewalk.jpg",
+    "earth_blue_marble.jpg",
+    "mars_curiosity.jpg",
+    "nasa_pia03883.jpg",
+    "nasa_pia12348.jpg",
+    "nasa_pia17011.jpg",
+    "nebula_hubble.jpg"
+  ],
+  "queries": [
+    "a photo of a cat",
+    "a dog playing in the park",
+    "a red sports car on a highway",
+    "a plate of food on a wooden table",
+    "a sunset over the ocean",
+    "people walking on a city street at night",
+    "a snowy mountain landscape",
+    "a child blowing out birthday candles",
+    "a laptop and a cup of coffee on a desk",
+    "a close-up of a flower with a bee",
+    "an old stone building with arched windows",
+    "a screenshot of a chat conversation"
+  ],
+  "preprocess": "siglip_image_pixels @224 + CLIP mean/std; clean_text(canonicalize=False) + open_clip ViT-B-32 tokenizer",
+  "generated": "2026-06-07"
+}
