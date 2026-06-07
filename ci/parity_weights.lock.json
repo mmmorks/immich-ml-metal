@@ -1,0 +1,38 @@
+{
+  "_comment": [
+    "Pinned model weights for the weights-gated CLIP/SigLIP2 + face parity gate.",
+    "Each entry fixes the upstream source by revision AND a sha256 over the file",
+    "the gate actually consumes, so an upstream re-publish cannot silently shift",
+    "embeddings underneath the parity assertions. ci/fetch_parity_weights.py",
+    "downloads at the pinned revision and fails the build on any digest mismatch.",
+    "Hosting these as our own artifacts (removing the HuggingFace dependency) is",
+    "tracked separately; this file pins against the current upstream sources.",
+    "To roll a pin: update revision + sha256 here, regenerate the committed ONNX",
+    "goldens (scripts/gen_parity_golden.py), and confirm the gate still passes."
+  ],
+  "sources": {
+    "siglip2": {
+      "kind": "hf_snapshot",
+      "repo": "mlx-community/siglip2-so400m-patch16-384",
+      "revision": "47bb082a6eeb9789923d547a845ca2c55ae39245",
+      "note": "fp16 pre-converted SigLIP2 served directly by the native MLX backend (no torch).",
+      "verify_file": "model.safetensors",
+      "sha256": "5eb53435c5cec8bb41bd74aca4c4eca03cc698c4533048b4a3f03ed73bd0378f"
+    },
+    "openai_clip": {
+      "kind": "hf_snapshot",
+      "repo": "openai/clip-vit-base-patch32",
+      "revision": "3d74acf9a28c67741b2f4f2ea7635f0aaf6f0268",
+      "note": "OpenAI CLIP port; the vendored backend converts this pytorch pickle to MLX on a cold cache (torch, convert-only). Pinning the source pickle + the cosine>=0.99 gate together catch any convert drift.",
+      "verify_file": "pytorch_model.bin",
+      "sha256": "a63082132ba4f97a80bea76823f544493bffa8082296d62d71581a4feff1576f"
+    },
+    "buffalo_l": {
+      "kind": "insightface_pack",
+      "pack": "buffalo_l",
+      "note": "InsightFace recognition pack; w600k_r50.onnx is the ArcFace recognition model the face parity gate exercises.",
+      "verify_file": "w600k_r50.onnx",
+      "sha256": "4c06341c33c2ca1f86781dab0e829f88ad5b64be9fba56e56bc9ebdefc619e43"
+    }
+  }
+}
