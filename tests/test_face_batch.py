@@ -5,10 +5,15 @@ These tests mock the ONNX model so they run without real weights.
 
 from unittest.mock import MagicMock, patch
 
+import cv2
 import numpy as np
 import pytest
 
-from src.models.face_embed import get_face_embeddings_batch
+from src.models.face_embed import (
+    get_face_embedding,
+    get_face_embedding_from_bbox,
+    get_face_embeddings_batch,
+)
 
 
 def _fake_img(w=640, h=480):
@@ -195,3 +200,39 @@ def test_embeddings_are_unit_normalized(mock_model):
     assert results[0] is not None
     norm = np.linalg.norm(results[0])
     assert abs(norm - 1.0) < 1e-5
+
+
+# --- Single-face zero-norm guard (parity with the batch path) ---
+
+
+def _png_bytes(w=640, h=480):
+    """Encode a fake BGR image as PNG so cv2.imdecode round-trips it."""
+    ok, buf = cv2.imencode(".png", _fake_img(w, h))
+    assert ok
+    return buf.tobytes()
+
+
+@pytest.fixture
+def zero_norm_model():
+    """A recognition model whose ArcFace output is degenerate (norm 0)."""
+    model = MagicMock()
+    model.get_feat = lambda imgs: np.zeros((1, 512), dtype=np.float32)
+    return model
+
+
+def test_get_face_embedding_zero_norm_returns_zero_vector(zero_norm_model):
+    with patch("src.models.face_embed.get_recognition_model", return_value=zero_norm_model):
+        emb = get_face_embedding(_png_bytes(), _LANDMARKS)
+    assert emb.shape == (512,)
+    assert not np.any(np.isnan(emb))  # no divide-by-zero NaN
+    assert np.linalg.norm(emb) == 0.0
+
+
+def test_get_face_embedding_from_bbox_zero_norm_returns_zero_vector(zero_norm_model):
+    bbox = {"x1": 100, "y1": 100, "x2": 200, "y2": 200}
+    with patch("src.models.face_embed.get_recognition_model", return_value=zero_norm_model):
+        emb = get_face_embedding_from_bbox(_png_bytes(), bbox)
+    assert emb is not None
+    assert emb.shape == (512,)
+    assert not np.any(np.isnan(emb))
+    assert np.linalg.norm(emb) == 0.0

@@ -324,7 +324,9 @@ def get_face_embedding(image_bytes: bytes, landmarks: list[list[float]], model_n
             raise
 
     embedding = embedding.flatten()
-    embedding = embedding / np.linalg.norm(embedding)
+    norm = np.linalg.norm(embedding)
+    if norm > 0:
+        embedding = embedding / norm
 
     return embedding.astype(np.float32)
 
@@ -507,7 +509,9 @@ def get_face_embedding_from_bbox(image_bytes: bytes, bbox: dict, model_name: str
             embedding = model.get_feat(face_resized)
 
         embedding = embedding.flatten()
-        embedding = embedding / np.linalg.norm(embedding)
+        norm = np.linalg.norm(embedding)
+        if norm > 0:
+            embedding = embedding / norm
 
         return embedding.astype(np.float32)
 
