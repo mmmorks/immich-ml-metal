@@ -128,6 +128,27 @@ def mlx_clip_cache_dir(hf_repo: str) -> Path:
     return _ml_model_cache_root() / f"mlx_clip-{hf_repo.replace('/', '__')}"
 
 
+def _expected_vision_arch(hf_repo: str) -> dict:
+    """Discriminating vision-tower params an OpenAI CLIP repo id encodes.
+
+    Used by the _load_model load-time guard to check the checkpoint mlx_clip
+    ACTUALLY loaded against the one we requested (ml-nqd). The repo name carries
+    both discriminators between the supported ports — patch size ('patchNN') and
+    base/large width (768/1024) — so they can be compared to the loaded model's
+    config without a separate manifest. Returns {} when the id encodes neither
+    (e.g. a non-OpenAI repo), meaning "nothing to verify".
+    """
+    m = re.search(r"patch(\d+)", hf_repo)
+    if not m:
+        return {}
+    arch = {"patch_size": int(m.group(1))}
+    if "large" in hf_repo:
+        arch["hidden_size"] = 1024
+    elif "base" in hf_repo:
+        arch["hidden_size"] = 768
+    return arch
+
+
 def siglip2_cache_dir(repo_id: str) -> Path:
     """Default local cache dir for a converted SigLIP2 repo.
 
@@ -301,9 +322,7 @@ def _supported_model_names() -> list[str]:
     """CLIP model names this service can serve — native MLX SigLIP2 plus the
     mlx_clip-backed OpenAI ports (LAION is unsupported — quick_gelu mismatch).
     Anything not listed here raises in ``_load_model``."""
-    return sorted(MLX_EMBEDDINGS_MAP) + sorted(
-        k for k, v in MODEL_MAP.items() if v is not None and k != "default"
-    )
+    return sorted(MLX_EMBEDDINGS_MAP) + sorted(k for k, v in MODEL_MAP.items() if v is not None and k != "default")
 
 
 class MLXClip:
@@ -367,8 +386,7 @@ class MLXClip:
             # branch instead. MODEL_MAP['default'] stays reachable only via an explicit
             # 'default' request (internal/test use), never from an unmapped Immich request.
             raise RuntimeError(
-                f"Unknown CLIP model '{self.model_name}': no MLX backend is mapped for it; only "
-                f"models with a native MLX or mlx_clip port are served. Supported: {_supported_model_names()}."
+                f"Unknown CLIP model '{self.model_name}': no MLX backend is mapped for it; only models with a native MLX or mlx_clip port are served. Supported: {_supported_model_names()}."
             )
 
         from mlx_clip import mlx_clip
@@ -382,8 +400,52 @@ class MLXClip:
         cache_dir = mlx_clip_cache_dir(self._repo_id)
         logger.info(f"Loading MLX CLIP model: {self.model_name} -> hf_repo={self._repo_id}, cache={cache_dir}")
         self._model = mlx_clip(str(cache_dir), hf_repo=self._repo_id)
+        self._assert_mlx_clip_checkpoint(cache_dir)
         self._loaded = True
         logger.info(f"Successfully loaded CLIP model via MLX: {self.model_name}")
+
+    def _assert_mlx_clip_checkpoint(self, cache_dir: Path):
+        """Fail loud if mlx_clip loaded a checkpoint other than the one requested.
+
+        Defends against the ml-7j8.17 footgun resurfacing. mlx_clip is a small
+        third-party port (harperreed) whose ctor converts its DEFAULT checkpoint
+        (openai/clip-vit-base-patch32) when the cache dir is absent — regardless
+        of hf_repo. We pass hf_repo correctly today, but a version bump (or a
+        stale/mixed cache dir) could still leave the loaded model out of sync
+        with the request, and that previously went unsignalled until search
+        quality dropped. scripts/clip_parity.py catches it end-to-end, but only
+        when run by hand; this makes the protection automatic at load.
+
+        Compares the loaded vision tower against the arch the repo id encodes
+        (patch size + base/large width). If the model structure can't be
+        introspected (a future mlx_clip restructure), warns rather than breaking
+        an otherwise-working load — the guard itself then needs maintenance.
+        """
+        repo = self._repo_id
+        if not repo:
+            return  # only the mlx_clip (non-None hf_repo) path reaches here
+        expected = _expected_vision_arch(repo)
+        if not expected:
+            return  # repo id doesn't encode an arch to verify against
+        vision = getattr(getattr(getattr(self._model, "model", None), "config", None), "vision_config", None)
+        if vision is None:
+            logger.warning(
+                "mlx_clip load-time guard could not introspect the vision config for "
+                f"{self.model_name} ({self._repo_id}); skipping checkpoint verification. "
+                "mlx_clip's model structure may have changed — review _assert_mlx_clip_checkpoint."
+            )
+            return
+        for attr, want in expected.items():
+            got = getattr(vision, attr, None)
+            if got != want:
+                raise RuntimeError(
+                    f"mlx_clip loaded the WRONG checkpoint for '{self.model_name}': requested "
+                    f"{self._repo_id} (vision {attr}={want}) but the loaded model reports "
+                    f"{attr}={got}. This is the ml-7j8.17 silent-wrong-weights footgun — an absent "
+                    f"or stale cache dir makes mlx_clip serve its DEFAULT openai/clip-vit-base-patch32. "
+                    f"Refusing to serve index-incompatible embeddings; delete the cache dir "
+                    f"({cache_dir}) and verify the mlx_clip version."
+                )
 
     def _load_siglip2_mlx(self):
         """Load a SigLIP2 model natively via mlx-embeddings.

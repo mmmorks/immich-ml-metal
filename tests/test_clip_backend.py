@@ -452,6 +452,103 @@ def test_laion_variants_fail_loud(monkeypatch, name):
     assert name not in clip_module._supported_model_names()
 
 
+# --- Load-time checkpoint guard (ml-nqd) -------------------------------------
+#
+# The tests above pin the hf_repo we *request*. This block guards the other
+# half: that the checkpoint mlx_clip *actually loaded* matches it. mlx_clip is a
+# small third-party port (harperreed) whose ctor footgun — an absent cache dir
+# converts the DEFAULT openai/clip-vit-base-patch32 regardless of hf_repo
+# (ml-7j8.17) — could be reintroduced by a version bump even though we now pass
+# hf_repo correctly. _load_model verifies the loaded vision tower against the
+# arch the repo id encodes (patch size + base/large width) and fails loud on
+# mismatch so wrong weights can't silently poison the smart-search index.
+
+import types
+
+
+def _fake_loaded_clip(patch_size, hidden_size=768):
+    """An mlx_clip-shaped stub exposing model.config.vision_config.{patch_size,hidden_size}."""
+    vision = types.SimpleNamespace(patch_size=patch_size, hidden_size=hidden_size)
+    config = types.SimpleNamespace(vision_config=vision)
+    return types.SimpleNamespace(model=types.SimpleNamespace(config=config))
+
+
+def _patch_mlx_clip_returning(monkeypatch, model):
+    """Patch mlx_clip.mlx_clip to return `model`; return a dict capturing args."""
+    import mlx_clip as mlx_clip_module
+
+    seen = {}
+
+    def fake_mlx_clip(model_dir, hf_repo=None):
+        seen["model_dir"] = model_dir
+        seen["hf_repo"] = hf_repo
+        return model
+
+    monkeypatch.setattr(mlx_clip_module, "mlx_clip", fake_mlx_clip)
+    return seen
+
+
+# (requested name, hf_repo, the patch size that checkpoint MUST report)
+_CORRECT_ARCH = {
+    "ViT-B-32__openai": ("openai/clip-vit-base-patch32", 32, 768),
+    "ViT-B-16__openai": ("openai/clip-vit-base-patch16", 16, 768),
+    "ViT-L-14__openai": ("openai/clip-vit-large-patch14", 14, 1024),
+}
+
+
+@pytest.mark.parametrize("name,repo,patch,hidden", [(n, r, p, h) for n, (r, p, h) in _CORRECT_ARCH.items()])
+def test_loaded_checkpoint_matching_arch_loads(monkeypatch, name, repo, patch, hidden):
+    """When mlx_clip returns the RIGHT arch the load completes normally."""
+    _patch_mlx_clip_returning(monkeypatch, _fake_loaded_clip(patch, hidden))
+    clip = _bare_for_load(name)
+    clip._load_model()
+    assert clip._loaded is True
+
+
+def test_loaded_checkpoint_wrong_patch_size_raises(monkeypatch):
+    """B-16 requested but mlx_clip hands back B-32 (patch32) weights — exactly the
+    ml-7j8.17 silent-wrong-weights footgun. The load must fail loud, naming the
+    mismatch, not quietly serve index-incompatible embeddings."""
+    # patch16 requested; loaded model reports patch32 (the default-checkpoint bug).
+    _patch_mlx_clip_returning(monkeypatch, _fake_loaded_clip(patch_size=32, hidden_size=768))
+    clip = _bare_for_load("ViT-B-16__openai")
+    with pytest.raises(RuntimeError) as ei:
+        clip._load_model()
+    msg = str(ei.value)
+    assert "ViT-B-16__openai" in msg
+    assert "patch_size" in msg
+    assert "16" in msg and "32" in msg, "error must show requested vs loaded patch size"
+    assert getattr(clip, "_loaded", False) is not True, "a mismatched load must not be marked loaded"
+
+
+def test_loaded_checkpoint_wrong_width_raises(monkeypatch):
+    """L-14 requested but the loaded vision width is the base 768 (not large 1024):
+    a different wrong checkpoint that shares no patch size — caught via hidden_size."""
+    # Correct patch (14) but base width — e.g. a partial/mixed cache.
+    _patch_mlx_clip_returning(monkeypatch, _fake_loaded_clip(patch_size=14, hidden_size=768))
+    clip = _bare_for_load("ViT-L-14__openai")
+    with pytest.raises(RuntimeError) as ei:
+        clip._load_model()
+    msg = str(ei.value)
+    assert "ViT-L-14__openai" in msg
+    assert "hidden_size" in msg
+    assert getattr(clip, "_loaded", False) is not True
+
+
+def test_loaded_checkpoint_guard_skips_when_unintrospectable(monkeypatch, caplog):
+    """If a future mlx_clip restructures so the vision config can't be found, the
+    guard must NOT break a working load — it warns (so the guard gets maintained)
+    rather than crashing on a model it can't inspect."""
+    _patch_mlx_clip_returning(monkeypatch, object())  # no .model.config.vision_config
+    clip = _bare_for_load("ViT-B-16__openai")
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        clip._load_model()
+    assert clip._loaded is True
+    assert any("guard" in r.message.lower() for r in caplog.records), "should warn it could not verify"
+
+
 # --- SigLIP2 tokenizer source resolution (ml-qax) ----------------------------
 
 
