@@ -1,8 +1,7 @@
 """Configuration settings for immich-ml-metal."""
 
 import os
-from pathlib import Path
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Literal
 import logging
 
@@ -16,14 +15,9 @@ class Settings:
     # Server settings
     host: str = "0.0.0.0"
     port: int = 3003
-    
-    # Model paths
-    models_dir: Path = field(default_factory=lambda: Path("./models"))
-    cache_dir: Path = field(default_factory=lambda: Path("./cache"))
-    
+
     # CLIP settings - using smaller model for low-memory systems
     clip_model: str = "ViT-B-32__openai"
-    clip_model_path: Path = field(default_factory=lambda: Path("./models/clip-vit-base-patch32-mlx"))
     
     # Face recognition settings
     # buffalo_l is Immich's default, provides best accuracy
@@ -58,19 +52,12 @@ class Settings:
     # Should be False when service is network-accessible
     debug_mode: bool = False
     
-    def __post_init__(self):
-        # Ensure directories exist
-        self.models_dir.mkdir(parents=True, exist_ok=True)
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
-    
     @classmethod
     def from_env(cls) -> "Settings":
         """Load settings from environment variables."""
         return cls(
             host=os.getenv("ML_HOST", "0.0.0.0"),
             port=int(os.getenv("ML_PORT", "3003")),
-            models_dir=Path(os.getenv("ML_MODELS_DIR", "./models")),
-            cache_dir=Path(os.getenv("ML_CACHE_DIR", "./cache")),
             clip_model=os.getenv("ML_CLIP_MODEL", "ViT-B-32__openai"),
             face_model=os.getenv("ML_FACE_MODEL", "buffalo_l"),
             face_min_score=float(os.getenv("ML_FACE_MIN_SCORE", "0.7")),
