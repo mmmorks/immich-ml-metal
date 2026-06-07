@@ -339,6 +339,50 @@ def embed_hf(
     return result
 
 
+ONNX_REPO_SIGLIP2 = "immich-app/ViT-SO400M-16-SigLIP2-384__webli"
+
+
+def embed_onnx_siglip2(images: list[tuple[str, bytes]], queries: list[str]) -> tuple[np.ndarray, np.ndarray]:
+    """Literal upstream SigLIP2 ONNX export (the checkpoint the production index
+    was built with) via onnxruntime, fed Immich's exact transform + tokenizer.
+
+    Returns (image_embeds [N,D], text_embeds [M,D]), L2-normalized float32.
+    """
+    import onnxruntime as ort
+    from huggingface_hub import hf_hub_download
+
+    from src.models.immich_preprocess import SiglipTextTokenizer, siglip_image_pixels
+
+    vis_path = hf_hub_download(ONNX_REPO_SIGLIP2, "visual/model.onnx")
+    txt_path = hf_hub_download(ONNX_REPO_SIGLIP2, "textual/model.onnx")
+    so = ort.SessionOptions()
+    so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+    vis = ort.InferenceSession(vis_path, so, providers=["CPUExecutionProvider"])
+    txt = ort.InferenceSession(txt_path, so, providers=["CPUExecutionProvider"])
+    vis_in = vis.get_inputs()[0].name
+    txt_in_meta = txt.get_inputs()[0]
+    txt_in = txt_in_meta.name
+    txt_dtype = np.int64 if "int64" in txt_in_meta.type else np.int32
+    tokenizer = SiglipTextTokenizer(hf_hub_download(HF_REPO, "tokenizer.json"))
+
+    def _l2(v: np.ndarray) -> np.ndarray:
+        n = np.linalg.norm(v)
+        return (v / n if n > 0 else v).astype(np.float32)
+
+    img_out = []
+    for _, b in images:
+        pil = Image.open(io.BytesIO(b)).convert("RGB")
+        px = siglip_image_pixels(pil).astype(np.float32)
+        img_out.append(_l2(vis.run(None, {vis_in: px})[0][0]))
+    txt_out = []
+    for q in queries:
+        ids = tokenizer(q).astype(txt_dtype)
+        txt_out.append(_l2(txt.run(None, {txt_in: ids})[0][0]))
+    del vis, txt
+    gc.collect()
+    return np.stack(img_out), np.stack(txt_out)
+
+
 # --------------------------------------------------------------------------- #
 # Reporting
 # --------------------------------------------------------------------------- #
@@ -382,9 +426,10 @@ def main() -> int:
     ap.add_argument(
         "--ref",
         nargs="+",
-        choices=["immich", "transformers", "openclip"],
+        choices=["onnx", "immich", "transformers", "openclip"],
         default=["immich"],
-        help="reference backend(s). 'immich'=Immich server transform (the gate "
+        help="reference backend(s). 'onnx'=literal upstream SigLIP2 ONNX export via onnxruntime; "
+        "'immich'=Immich server transform (the gate "
         "AND port fidelity, since both sides share production preprocessing); "
         "'transformers'=HF squash (regression witness for the pre-parity-fix path); "
         "'openclip'=open_clip's own torchvision transform (diagnostic only)",
@@ -424,8 +469,11 @@ def main() -> int:
     if "openclip" in args.ref:
         print("\n[backend] open_clip webli (open_clip's own transform — diagnostic) ...")
         refs["openclip"] = embed_openclip(images, queries, args.device)
+    if "onnx" in args.ref:
+        print("\n[backend] literal ONNX SigLIP2 export via onnxruntime ...")
+        refs["onnx"] = embed_onnx_siglip2(images, queries)
     # Order the report so the gate (immich) is first.
-    refs = {k: refs[k] for k in ("immich", "transformers", "openclip") if k in refs}
+    refs = {k: refs[k] for k in ("onnx", "immich", "transformers", "openclip") if k in refs}
 
     # Build report.
     lines: list[str] = []
