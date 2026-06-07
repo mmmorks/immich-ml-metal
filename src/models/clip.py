@@ -22,6 +22,18 @@ from src.models.immich_preprocess import siglip_image_pixels
 
 logger = logging.getLogger(__name__)
 
+
+def _l2_normalize(embedding: np.ndarray) -> np.ndarray:
+    """L2-normalize an embedding, guarding against a zero vector.
+
+    A genuinely zero pooled output (degenerate input or fp16 underflow) has a
+    zero norm; dividing by it yields an all-NaN vector that silently poisons the
+    smart-search index or query. Return the (zero) vector unchanged instead.
+    """
+    norm = np.linalg.norm(embedding)
+    return embedding / norm if norm > 0 else embedding
+
+
 # Model name mapping: Immich name -> MLX repo (or None to use open_clip fallback)
 MODEL_MAP = {
     # OpenAI CLIP models -> MLX
@@ -461,7 +473,7 @@ class MLXClip:
             return embedding
 
         embedding = self._infer_with_swap_retry("preprocessing", prepare, run)
-        embedding = embedding / np.linalg.norm(embedding)
+        embedding = _l2_normalize(embedding)
         return embedding.flatten().astype(np.float32)
 
     def _encode_image_fallback(self, image: Image.Image) -> np.ndarray:
@@ -515,7 +527,7 @@ class MLXClip:
         embedding = self._infer_with_swap_retry(
             "preprocessing (siglip2)", prepare, run
         )
-        embedding = embedding / np.linalg.norm(embedding)
+        embedding = _l2_normalize(embedding)
         return embedding.flatten().astype(np.float32)
 
     def encode_text(self, text: str) -> np.ndarray:
@@ -541,7 +553,7 @@ class MLXClip:
             embedding = model_ref.text_encoder(text)
             if isinstance(embedding, mx.array):
                 embedding = np.array(embedding)
-            embedding = embedding / np.linalg.norm(embedding)
+            embedding = _l2_normalize(embedding)
             return embedding.flatten().astype(np.float32)
 
     def _encode_text_fallback(self, text: str) -> np.ndarray:
@@ -591,7 +603,7 @@ class MLXClip:
         embedding = self._infer_with_swap_retry(
             "tokenization (siglip2)", prepare, run
         )
-        embedding = embedding / np.linalg.norm(embedding)
+        embedding = _l2_normalize(embedding)
         return embedding.flatten().astype(np.float32)
 
     def unload(self):

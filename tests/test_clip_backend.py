@@ -145,6 +145,34 @@ def test_siglip2_image_and_text_paths_independent():
         assert np.linalg.norm(emb) == pytest.approx(1.0, abs=1e-5)
 
 
+# --- Zero-embedding guard (ml-9g1) -------------------------------------------
+#
+# A genuinely zero pooled output (degenerate input / fp16 underflow) divided by
+# its zero L2 norm yields an all-NaN vector that silently poisons the smart-
+# search index or query. The encode paths must leave a zero vector untouched
+# rather than producing NaN.
+
+
+def test_siglip2_image_zero_embedding_does_not_nan():
+    clip = _bare_siglip2(_FakeSiglip2Model(np.zeros(SIGLIP2_DIM, dtype=np.float32)))
+
+    emb = clip.encode_image(_red_jpeg())
+
+    assert emb.shape == (SIGLIP2_DIM,)
+    assert not np.isnan(emb).any(), "zero embedding must not normalize to NaN"
+    assert np.all(emb == 0.0), "a zero raw output should stay zero, not become NaN"
+
+
+def test_siglip2_text_zero_embedding_does_not_nan():
+    clip = _bare_siglip2(_FakeSiglip2Model(np.zeros(SIGLIP2_DIM, dtype=np.float32)))
+
+    emb = clip.encode_text("a photo of a cat")
+
+    assert emb.shape == (SIGLIP2_DIM,)
+    assert not np.isnan(emb).any(), "zero embedding must not normalize to NaN"
+    assert np.all(emb == 0.0), "a zero raw output should stay zero, not become NaN"
+
+
 # --- Name mapping invariants -------------------------------------------------
 
 
