@@ -157,6 +157,9 @@ def ensure_convert(cfg: Precision, source: str, out_root: Path) -> Path:
 
     if siglip2_dir_is_complete(out):
         print(f"[convert] {cfg.key}: reusing existing {out}")
+        # A dir from an interrupted run (or older code) may still carry the
+        # skip_vision key that crashes the loader — strip it before reuse.
+        _strip_skip_vision_key(out)
         return out
 
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -300,6 +303,17 @@ def gib(n: int) -> float:
     return n / (1024 ** 3)
 
 
+def pct_save(new: int, base: int) -> str:
+    """A percentage reduction of ``new`` vs ``base``, or "n/a" if unmeasurable.
+
+    ``base`` can be 0 — e.g. ``mx.get_peak_memory()`` returns 0 on some paths —
+    so guard the division rather than crash (or report a misleading 100%).
+    """
+    if base <= 0:
+        return "n/a"
+    return f"{(1 - new / base) * 100:.0f}%"
+
+
 def recommend(results: list[Result]) -> tuple[str, list[str]]:
     """Recommend the production default and (if any) a safe opt-in, with reasons.
 
@@ -345,15 +359,15 @@ def recommend(results: list[Result]) -> tuple[str, list[str]]:
     # (vision quant is unsupported), so none earns a default change on its own.
     if usable:
         opt = usable[0]  # smallest retrieval-preserving variant
-        disk_save = (1 - opt.disk_bytes / base.disk_bytes) * 100
-        mem_save = (1 - opt.peak_mem_bytes / base.peak_mem_bytes) * 100
+        disk_save = pct_save(opt.disk_bytes, base.disk_bytes)
+        mem_save = pct_save(opt.peak_mem_bytes, base.peak_mem_bytes)
         rationale.append(
             f"=> DEFAULT: fp16 (unchanged) — quantization can't reach the vision "
             f"tower, so the image-indexing path gets no speed/accuracy benefit."
         )
         rationale.append(
-            f"=> OPT-IN: {opt.key} — near-lossless ({disk_save:.0f}% smaller disk, "
-            f"{mem_save:.0f}% lower peak memory, retrieval identical) for "
+            f"=> OPT-IN: {opt.key} — near-lossless ({disk_save} smaller disk, "
+            f"{mem_save} lower peak memory, retrieval identical) for "
             f"memory-constrained installs. Revisit a real default change when "
             f"mlx_embeddings can quantize the SigLIP vision attention."
         )
