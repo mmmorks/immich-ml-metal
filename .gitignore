@@ -1,1 +1,13 @@
+# Python
 **/__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Virtualenv
+venv/
+.venv/
+
+# Downloaded model weights / runtime caches
+mlx-community/
+models/
+cache/
