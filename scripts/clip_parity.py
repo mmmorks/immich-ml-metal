@@ -30,17 +30,13 @@ per-item cosine similarity:
                  tokenizer. Isolates any gap that is purely preprocessing rather
                  than weights/activation.
 
-Caveat for non-default models: only ``ViT-B-32__openai`` is verified.
-``MLXClip._load_model`` calls ``mlx_clip(repo_id)`` WITHOUT ``hf_repo``, so a
-model whose local dir is absent converts the DEFAULT
-``openai/clip-vit-base-patch32`` — i.e. ``ViT-B-16__openai`` / ``ViT-L-14__openai``
-/ the LAION mappings all silently load OpenAI B-32 weights (empirically ~0 cosine
-vs the right reference). mlx_clip also hardcodes ``quick_gelu`` (``model.py``),
-which is wrong for LAION's standard-GELU ViT-B-32. So those models FAIL this gate;
-run them with ``--model`` to see it. The fix: pass the correct
-``hf_repo`` so mlx_clip loads the intended OpenAI B-16/L-14 weights, and mark
-LAION unsupported (``MODEL_MAP -> None``, which raises) — mlx_clip can't reproduce
-its standard-GELU activation and the open_clip fallback was removed.
+All four ports are now verified: the OpenAI B-32/B-16/L-14 ports and the LAION
+``ViT-B-32`` (``laion2b_s34b_b79k``). The vendored backend (``src/models/clip_mlx.py``)
+takes an explicit ``hf_repo`` and a configurable activation, so each name converts
+its OWN checkpoint and runs standard ``gelu`` — matching Immich's ONNX export. (An
+earlier third-party loader took the repo id as a local ``model_dir`` and hardcoded
+``quick_gelu``, so non-default names silently loaded OpenAI B-32 with the wrong
+activation; that footgun is gone.) Run any model with ``--model`` to re-check.
 
 Backends are loaded and freed sequentially to bound peak memory, so this runs on
 a single Apple-Silicon Mac.
@@ -49,7 +45,7 @@ Usage (from ml/, venv active):
 
     .venv/bin/python scripts/clip_parity.py                      # ViT-B-32__openai, download samples
     .venv/bin/python scripts/clip_parity.py --images ~/Pics      # real library photos
-    .venv/bin/python scripts/clip_parity.py --model ViT-B-32__laion2b-s34b-b79k  # the GELU-mismatch case
+    .venv/bin/python scripts/clip_parity.py --model ViT-B-32__laion2b-s34b-b79k  # LAION (standard-gelu) port
     .venv/bin/python scripts/clip_parity.py --threshold 0.99 --report out.md
 
 For the real preserve-vs-reindex decision, point ``--images`` at a sample of the
@@ -319,12 +315,10 @@ def main() -> int:
         emit("  => mlx_clip embeddings are NOT interchangeable with the Immich server for")
         emit("     this model — do NOT use it as a drop-in (indexing through it would")
         emit("     poison the smart-search index). A near-ZERO cosine indicates different")
-        emit("     WEIGHTS, not just preprocessing: MLXClip._load_model calls mlx_clip()")
-        emit("     without hf_repo, so non-default models convert the default")
-        emit("     openai/clip-vit-base-patch32 (and mlx_clip hardcodes quick_gelu, wrong")
-        emit("     for LAION). Fix: pass the correct hf_repo so mlx_clip loads")
-        emit("     the intended weights (OpenAI B-16/L-14), or mark LAION unsupported")
-        emit("     (MODEL_MAP -> None; raises). See the README CLIP mapping notes.")
+        emit("     WEIGHTS, not just preprocessing: check the MODEL_MAP hf_repo for this")
+        emit("     name resolves to the intended checkpoint and that the vendored backend")
+        emit("     loads it with standard gelu (act override). A stale/mixed convert in the")
+        emit("     cache dir can also drift it. See the README CLIP mapping notes.")
         verdict_rc = 1
     emit("-" * 78)
 

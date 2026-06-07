@@ -25,13 +25,16 @@ from src.models.immich_preprocess import clean_text, siglip_image_pixels
 
 logger = logging.getLogger(__name__)
 
-# Activation for the vendored OpenAI-CLIP backend. Immich's shipped OpenAI-CLIP
-# ONNX exports (the artifact a stock smart-search index was built with) run
-# STANDARD gelu — NOT the checkpoint's native quick_gelu. Loading these weights
-# with quick_gelu drifts ~0.97 cosine from that index (both towers, worse with
-# depth); standard gelu matches it to 1.0000. We match Immich's export, not the
-# source checkpoint. See scripts/clip_parity.py and the README "CLIP parity" notes.
-_OPENAI_CLIP_ACTIVATION = "gelu"
+# Activation for the vendored CLIP backend (OpenAI and LAION ports). Immich's
+# shipped CLIP ONNX exports (the artifact a stock smart-search index was built
+# with) run STANDARD gelu. For the OpenAI ports this is NOT the checkpoint's
+# native quick_gelu — loading those weights with quick_gelu drifts ~0.97 cosine
+# from that index (both towers, worse with depth); standard gelu matches it to
+# 1.0000. The LAION ports were trained with standard gelu natively, so this same
+# value is also correct (and matches their config.json) — one constant serves
+# both. We match Immich's export, not the source checkpoint. See
+# scripts/clip_parity.py and the README "CLIP parity" notes.
+_VENDORED_CLIP_ACTIVATION = "gelu"
 
 
 def _l2_normalize(embedding: np.ndarray) -> np.ndarray:
@@ -57,20 +60,22 @@ def _l2_normalize(embedding: np.ndarray) -> np.ndarray:
 MODEL_MAP = {
     # OpenAI CLIP models -> vendored backend, converting the CORRECT OpenAI
     # checkpoint and running it with STANDARD gelu (hidden_act override) to match
-    # Immich's ONNX export — see _OPENAI_CLIP_ACTIVATION. Its CLIPImageProcessor
+    # Immich's ONNX export — see _VENDORED_CLIP_ACTIVATION. Its CLIPImageProcessor
     # (resize-shortest + center-crop) matches the Immich index too, so these are
     # verified parity-faithful (clip_parity.py: cosine 1.0000 vs the index). The
     # arch (patch size, depth, width) is read from each repo's config.json.
     "ViT-B-32__openai": "openai/clip-vit-base-patch32",
     "ViT-B-16__openai": "openai/clip-vit-base-patch16",
     "ViT-L-14__openai": "openai/clip-vit-large-patch14",
-    # LAION CLIP models -> None (not yet wired). LAION trained with STANDARD gelu,
-    # which the vendored backend CAN now run (the activation is configurable, the
-    # reason this was previously deemed impossible). But LAION parity has not been
-    # verified or wired up, so these still raise rather than serve unverified
-    # vectors. Enabling them is tracked as follow-up work.
-    "ViT-B-32__laion2b-s34b-b79k": None,
-    "ViT-B-32__laion2b_s34b_b79k": None,
+    # LAION CLIP models -> vendored backend, converting LAION's HF transformers
+    # checkpoint. LAION trained with STANDARD gelu (the config's native hidden_act),
+    # which the vendored backend runs — the same activation the OpenAI ports are
+    # forced to, so _VENDORED_CLIP_ACTIVATION serves both. The HF repo ships both
+    # the open_clip and the transformers format; the convert path reads the
+    # transformers pytorch_model.bin + config.json. Verified parity-faithful
+    # (clip_parity.py: cosine 1.0000 vs the open_clip laion2b_s34b_b79k reference).
+    "ViT-B-32__laion2b-s34b-b79k": "laion/CLIP-ViT-B-32-laion2B-s34B-b79K",
+    "ViT-B-32__laion2b_s34b_b79k": "laion/CLIP-ViT-B-32-laion2B-s34B-b79K",
     # SigLIP / SigLIP2 models. The SO400M SigLIP2 default is handled natively via
     # MLX_EMBEDDINGS_MAP below (checked first in _load_model). The ViT-B-16 SigLIP
     # variants have no MLX backend (None), so _load_model raises a clear error for
@@ -327,8 +332,8 @@ def _resolve_siglip2_tokenizer_json(path_or_repo: str) -> str:
 
 def _supported_model_names() -> list[str]:
     """CLIP model names this service can serve — native MLX SigLIP2 plus the
-    mlx_clip-backed OpenAI ports (LAION is unsupported — quick_gelu mismatch).
-    Anything not listed here raises in ``_load_model``."""
+    vendored-backend OpenAI and LAION ports (all run standard gelu). Anything not
+    listed here raises in ``_load_model``."""
     return sorted(MLX_EMBEDDINGS_MAP) + sorted(k for k, v in MODEL_MAP.items() if v is not None and k != "default")
 
 
@@ -373,16 +378,13 @@ class MLXClip:
             if self._repo_id is None:
                 # An explicitly-listed model with no parity-faithful backend: the
                 # SigLIP v1/v2 ViT-B-16 variants (open_clip's squash preprocessing
-                # diverged from the index) and the LAION ports (vendored backend
-                # could run their standard gelu, but LAION parity is not yet
-                # verified/wired). Fail clearly rather than silently substituting
-                # the wrong (default) model.
+                # diverged from the index). Fail clearly rather than silently
+                # substituting the wrong (default) model.
                 raise RuntimeError(
                     f"CLIP model '{self.model_name}' has no parity-faithful MLX backend yet. The "
                     f"open_clip fallback was removed because its SigLIP preprocessing "
-                    f"diverges from the Immich index, and the LAION ports are not yet wired/"
-                    f"verified; only models with a native MLX or vendored CLIP port are "
-                    f"served. Supported: {_supported_model_names()}."
+                    f"diverges from the Immich index; only models with a native MLX or "
+                    f"vendored CLIP port are served. Supported: {_supported_model_names()}."
                 )
         else:
             # An unmapped model name. This used to silently load MODEL_MAP['default']
@@ -398,12 +400,12 @@ class MLXClip:
         # VendoredMlxClip(model_dir, hf_repo, hidden_act): pass the LOCAL cache dir
         # as model_dir and the CORRECT checkpoint as hf_repo. On first use the dir
         # is absent so the loader converts hf_repo into it; afterwards it loads the
-        # converted weights. hidden_act forces STANDARD gelu so embeddings match
-        # Immich's ONNX export rather than the checkpoint's native quick_gelu (see
-        # _OPENAI_CLIP_ACTIVATION).
+        # converted weights. hidden_act pins STANDARD gelu so embeddings match
+        # Immich's ONNX export — an override for the OpenAI ports (native
+        # quick_gelu), and LAION's native activation (see _VENDORED_CLIP_ACTIVATION).
         cache_dir = mlx_clip_cache_dir(self._repo_id)
-        logger.info(f"Loading MLX CLIP model: {self.model_name} -> hf_repo={self._repo_id}, cache={cache_dir}, act={_OPENAI_CLIP_ACTIVATION}")
-        self._model = VendoredMlxClip(str(cache_dir), hf_repo=self._repo_id, hidden_act=_OPENAI_CLIP_ACTIVATION)
+        logger.info(f"Loading MLX CLIP model: {self.model_name} -> hf_repo={self._repo_id}, cache={cache_dir}, act={_VENDORED_CLIP_ACTIVATION}")
+        self._model = VendoredMlxClip(str(cache_dir), hf_repo=self._repo_id, hidden_act=_VENDORED_CLIP_ACTIVATION)
         self._assert_mlx_clip_checkpoint(cache_dir)
         self._loaded = True
         logger.info(f"Successfully loaded CLIP model via MLX: {self.model_name}")

@@ -153,27 +153,25 @@ Configure via environment variables or edit `src/config.py`:
   - This is Immich's current default smart-search model. See
     [Native SigLIP2 backend](#native-siglip2-backend) below.
 
-- OpenAI CLIP models -> MLX (via the **vendored CLIP backend**, `src/models/clip_mlx.py`),
-  converting the **original OpenAI checkpoint** on first use and running it with
-  **standard `gelu`** to match Immich's ONNX export (NOT the checkpoint's native
-  `quick_gelu` — see [CLIP parity](#clip-parity-vendored-openai-clip-path)). Its
-  resize-shortest + center-crop image processor matches the Immich index, so these
-  are verified parity-faithful.
+- OpenAI & LAION CLIP models -> MLX (via the **vendored CLIP backend**,
+  `src/models/clip_mlx.py`), converting the HF checkpoint on first use and running it
+  with **standard `gelu`** to match Immich's ONNX export (see
+  [CLIP parity](#clip-parity-vendored-openai-clip-path)). Its resize-shortest +
+  center-crop image processor matches the Immich index, so these are verified
+  parity-faithful.
   - `ViT-B-32__openai` -> `openai/clip-vit-base-patch32`
   - `ViT-B-16__openai`-> `openai/clip-vit-base-patch16`
   - `ViT-L-14__openai`-> `openai/clip-vit-large-patch14`
+  - `ViT-B-32__laion2b-s34b-b79k` / `ViT-B-32__laion2b_s34b_b79k` ->
+    `laion/CLIP-ViT-B-32-laion2B-s34B-b79K`
+  - For the **OpenAI** ports, standard `gelu` is an override of the checkpoint's
+    native `quick_gelu`; **LAION** was trained with standard `gelu` natively, so the
+    same setting is correct for both.
   - **Needs `pip install torch` for the first-use conversion only.** torch is an
     optional, convert-only dependency (not in `requirements.txt`) — it reads the
     source PyTorch checkpoint pickle. Serving the cached MLX weights afterward, and
-    the default SigLIP2 path, need no torch. Requesting an OpenAI port on a fresh,
+    the default SigLIP2 path, need no torch. Requesting one of these ports on a fresh,
     torch-free install raises an actionable error pointing you here.
-
-- LAION CLIP models -> **unsupported** (not yet wired; raises a clear error)
-  - `ViT-B-32__laion2b-s34b-b79k`
-  - `ViT-B-32__laion2b_s34b_b79k`
-  - LAION trained with **standard** `gelu`, which the vendored backend can now run
-    (its activation is configurable), but LAION parity has not been verified/wired,
-    so it raises rather than serving unverified vectors.
 
 - Other SigLIP models -> **unsupported** (no MLX backend; raises a clear error)
   - `ViT-B-16-SigLIP__webli`
@@ -182,9 +180,9 @@ Configure via environment variables or edit `src/config.py`:
 - Unknown/unmapped model name: **raises** a clear error (the `default` mapping is
   reachable only via an explicit `default` request, for internal/test use)
 
-The LAION and ViT-B-16 SigLIP variants have no parity-faithful MLX backend, so
-requesting one raises a clear error rather than silently serving non-parity
-embeddings (see [Parity-or-fail](#parity-or-fail)). **An earlier wrong-weights bug
+The ViT-B-16 SigLIP variants have no parity-faithful MLX backend, so requesting one
+raises a clear error rather than silently serving non-parity embeddings (see
+[Parity-or-fail](#parity-or-fail)). **An earlier wrong-weights bug
 made every OpenAI port except `ViT-B-32__openai` silently load OpenAI B-32 weights**:
 the third-party loader took its first arg as a local `model_dir`, and passing the
 repo id there (instead of as `hf_repo`) made an absent dir fall back to that loader's
@@ -201,13 +199,14 @@ is checked by a dedicated gate, `scripts/clip_parity.py` — the production back
 vs the same open_clip checkpoint Immich exports to ONNX, run through Immich's
 *exact* transform.
 
-All three OpenAI ports are **verified drop-ins, no re-index** — image **and** text
+All four supported ports are **verified drop-ins, no re-index** — image **and** text
 cosine `1.0000` (12 photos × 12 queries), top-1 retrieval agreement `1.000`, vs the
 Immich-transform reference:
 
 - **`ViT-B-32__openai`** — `1.0000` / `1.0000`.
 - **`ViT-B-16__openai`** — `1.0000` / `1.0000`.
 - **`ViT-L-14__openai`** — `1.0000` / `1.0000`.
+- **`ViT-B-32__laion2b-s34b-b79k`** — `1.0000` / `1.0000`.
 
 **Activation — the subtle part.** OpenAI CLIP's *native* activation is `quick_gelu`,
 but Immich's shipped ONNX export for these ports runs **standard `gelu`**. (Verified:
@@ -224,9 +223,11 @@ against a quick_gelu reference. The vendored backend made the activation configu
 
 Text uses `clean_text(canonicalize=False)` then the CLIP BPE tokenizer (OpenAI BPE is
 case/punctuation-bearing, unlike SigLIP); images use resize-shortest-224 + center-crop
-+ CLIP-normalize — reproducing the standard Immich server. **LAION** is currently
-**unsupported** (`_load_model` raises): the vendored backend *can* now run its standard
-gelu, but LAION parity is not yet verified/wired. Re-check any model with
++ CLIP-normalize — reproducing the standard Immich server. **LAION** (`ViT-B-32` /
+`laion2b_s34b_b79k`) runs through the same vendored backend: its HF repo ships a
+transformers-format checkpoint the convert path reads, and its native activation is
+already standard `gelu`, so no override is needed — verified `1.0000` / `1.0000`
+against the open_clip `laion2b_s34b_b79k` reference. Re-check any model with
 `.venv/bin/python scripts/clip_parity.py --model <name>`.
 
 #### CLIP speed (vendored OpenAI-CLIP path)
@@ -353,11 +354,11 @@ So:
   transform; see [Native SigLIP2 backend](#native-siglip2-backend)). A load
   failure **raises** rather than falling back, so a partial cache / version drift
   can't poison the index; `/health` then reports degraded.
-- OpenAI CLIP models are served by the vendored CLIP backend (`src/models/clip_mlx.py`),
-  converting the original OpenAI checkpoint and running it with **standard `gelu`** +
-  center-crop preprocessing to match Immich's ONNX export (parity-faithful).
-- A model with no parity-faithful backend yet — the LAION ports (runnable in
-  principle but not verified/wired) and the `ViT-B-16-SigLIP*` variants —
+- OpenAI and LAION CLIP models are served by the vendored CLIP backend
+  (`src/models/clip_mlx.py`), converting the HF checkpoint and running it with
+  **standard `gelu`** + center-crop preprocessing to match Immich's ONNX export
+  (parity-faithful).
+- A model with no parity-faithful backend — the `ViT-B-16-SigLIP*` variants —
   **raises a clear "no parity-faithful MLX backend" error** instead of silently
   serving non-parity vectors.
 

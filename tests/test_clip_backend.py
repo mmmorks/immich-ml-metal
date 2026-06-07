@@ -425,12 +425,14 @@ def test_explicit_default_still_loads(monkeypatch):
 # repo id positionally as model_dir with no hf_repo, so B-16/L-14/LAION all
 # silently served OpenAI B-32 weights. These tests pin the corrected routing.
 
-# OpenAI models mlx_clip can serve faithfully -> the CORRECT hf_repo is converted.
+# OpenAI models the vendored backend serves faithfully -> the CORRECT hf_repo is converted.
 WRONG_WEIGHTS_OPENAI = {
     "ViT-B-16__openai": "openai/clip-vit-base-patch16",
     "ViT-L-14__openai": "openai/clip-vit-large-patch14",
 }
-# LAION models mlx_clip CANNOT serve (it hardcodes quick_gelu) -> must fail loud.
+# LAION models -> the vendored backend converts LAION's HF transformers checkpoint
+# and runs it with standard gelu (LAION's native activation), verified parity-faithful.
+LAION_REPO = "laion/CLIP-ViT-B-32-laion2B-s34B-b79K"
 LAION_NAMES = ("ViT-B-32__laion2b-s34b-b79k", "ViT-B-32__laion2b_s34b_b79k")
 
 
@@ -469,20 +471,24 @@ def test_openai_ports_request_standard_gelu(monkeypatch, name):
 
 
 @pytest.mark.parametrize("name", LAION_NAMES)
-def test_laion_variants_fail_loud(monkeypatch, name):
-    """LAION names must raise (no parity-faithful backend) rather than silently
-    serve OpenAI B-32 — mlx_clip must never be invoked for them."""
-    called = _capture_mlx_clip(monkeypatch)
+def test_laion_variants_convert_correct_weights(monkeypatch, name):
+    """LAION names must convert LAION's OWN transformers checkpoint with standard
+    gelu, never the OpenAI B-32 default. The requested repo must reach the vendored
+    backend as hf_repo (not as model_dir, the arg that silently fell back to the
+    default), and the names must appear in the supported-list helper."""
+    seen = _capture_mlx_clip(monkeypatch)
 
     clip = _bare_for_load(name)
-    with pytest.raises(RuntimeError) as ei:
-        clip._load_model()
+    clip._load_model()
 
-    msg = str(ei.value)
-    assert name in msg
-    assert "LAION" in msg or "gelu" in msg.lower(), "error should explain the LAION/gelu reason"
-    assert called == {}, "mlx_clip must not be called for a LAION model"
-    assert name not in clip_module._supported_model_names()
+    assert seen["hf_repo"] == LAION_REPO, f"{name} must convert {LAION_REPO}"
+    assert seen["hf_repo"] != "openai/clip-vit-base-patch32"
+    # The repo id must NOT be passed as the model_dir (the original bug shape).
+    assert seen["model_dir"] != LAION_REPO
+    # LAION is standard-gelu natively, matching Immich's export.
+    assert seen["hidden_act"] == "gelu", f"{name} must load with standard gelu"
+    assert clip._loaded is True
+    assert name in clip_module._supported_model_names()
 
 
 # --- Load-time checkpoint guard ----------------------------------------------
