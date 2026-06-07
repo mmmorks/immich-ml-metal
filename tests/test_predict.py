@@ -53,6 +53,47 @@ async def test_health(client):
     assert data["stub_mode"] is True
 
 
+SECRET = "/Users/secret/path/model.bin not found"
+
+
+@pytest.mark.asyncio
+async def test_health_hides_error_details_without_debug(client, monkeypatch):
+    """ml-7j8.8: /health must not leak raw exception strings when debug_mode is off."""
+    import src.main as main
+
+    monkeypatch.setattr(main, "STUB_MODE", False)
+    monkeypatch.setattr(main.settings, "debug_mode", False)
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError(SECRET)
+
+    monkeypatch.setattr(main, "get_clip", _boom)
+
+    resp = await client.get("/health")
+    data = resp.json()
+    # Degraded, but the raw exception string must not appear anywhere in the body.
+    assert data["checks"]["clip"] == "error"
+    assert SECRET not in json.dumps(data)
+
+
+@pytest.mark.asyncio
+async def test_health_exposes_error_details_with_debug(client, monkeypatch):
+    """With debug_mode on, the raw exception string is allowed through for diagnostics."""
+    import src.main as main
+
+    monkeypatch.setattr(main, "STUB_MODE", False)
+    monkeypatch.setattr(main.settings, "debug_mode", True)
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError(SECRET)
+
+    monkeypatch.setattr(main, "get_clip", _boom)
+
+    resp = await client.get("/health")
+    data = resp.json()
+    assert data["checks"]["clip"] == f"error: {SECRET}"
+
+
 # --- Predict: single tasks ---
 
 @pytest.mark.asyncio

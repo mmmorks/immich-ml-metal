@@ -377,7 +377,9 @@ async def health():
                 health_status["checks"]["clip"] = "ok"
             except Exception as e:
                 logger.error(f"CLIP health check failed: {e}")
-                health_status["checks"]["clip"] = f"error: {str(e)}"
+                health_status["checks"]["clip"] = (
+                    f"error: {str(e)}" if settings.debug_mode else "error"
+                )
                 health_status["status"] = "degraded"
 
             # Check face recognition model
@@ -388,7 +390,9 @@ async def health():
                 health_status["checks"]["face_recognition"] = "ok"
             except Exception as e:
                 logger.error(f"Face recognition health check failed: {e}")
-                health_status["checks"]["face_recognition"] = f"error: {str(e)}"
+                health_status["checks"]["face_recognition"] = (
+                    f"error: {str(e)}" if settings.debug_mode else "error"
+                )
                 health_status["status"] = "degraded"
 
             # Actually test Vision framework with a minimal image
@@ -403,7 +407,9 @@ async def health():
                 health_status["checks"]["vision_framework"] = "ok"
             except Exception as e:
                 logger.error(f"Vision framework health check failed: {e}")
-                health_status["checks"]["vision_framework"] = f"error: {str(e)}"
+                health_status["checks"]["vision_framework"] = (
+                    f"error: {str(e)}" if settings.debug_mode else "error"
+                )
                 health_status["status"] = "degraded"
         else:
             health_status["checks"]["stub_mode"] = "active"
@@ -412,8 +418,9 @@ async def health():
 
     except Exception as e:
         logger.error(f"Health check failed: {e}", exc_info=True)
+        error_detail = str(e) if settings.debug_mode else "Internal server error"
         return JSONResponse(
-            content={"status": "unhealthy", "error": str(e)}, status_code=503
+            content={"status": "unhealthy", "error": error_detail}, status_code=503
         )
 
 
