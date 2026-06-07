@@ -10,6 +10,8 @@ import numpy as np
 import pytest
 
 from src.models.face_embed import (
+    ARCFACE_INPUT_SIZE,
+    _norm_crop,
     get_face_embedding,
     get_face_embedding_from_bbox,
     get_face_embeddings_batch,
@@ -52,14 +54,22 @@ def _aligned_face(dx=0.0, dy=0.0, score=0.9):
 
 @pytest.fixture
 def mock_model():
-    """Mock the recognition model to return fake 512-dim embeddings."""
+    """Mock the recognition model to return fake 512-dim embeddings.
+
+    ``get_feat`` is a ``MagicMock`` driven by a SEEDED generator, which buys two
+    things: tests can inspect ``get_feat.call_args`` to assert the exact crops the
+    batch path fed to inference, and the per-row draws are deterministic — so the
+    "different faces get different embeddings" assertions never flake on an
+    unseeded RNG collision.
+    """
     model = MagicMock()
+    rng = np.random.default_rng(20240607)
 
     def fake_get_feat(imgs):
         n = len(imgs) if isinstance(imgs, list) else imgs.shape[0]
-        return np.random.randn(n, 512).astype(np.float32)
+        return rng.standard_normal((n, 512)).astype(np.float32)
 
-    model.get_feat = fake_get_feat
+    model.get_feat = MagicMock(side_effect=fake_get_feat)
     return model
 
 
@@ -98,8 +108,77 @@ def test_result_order_preserved(mock_model):
         results = get_face_embeddings_batch(img, faces)
     assert len(results) == 2
     assert results[0] is not None and results[1] is not None
-    # Each face should get a different embedding (random, so extremely unlikely to match)
+    # Each face gets a distinct embedding. The mock's generator is seeded, so the
+    # two per-row draws are deterministically different — this asserts the path
+    # keeps faces separate, with no unseeded-RNG flake.
     assert not np.array_equal(results[0], results[1])
+
+
+# --- Crop fed to inference: the aligned 112x112 crop, not just ordering ---
+#
+# The mock records the exact list handed to get_feat, so these pin the
+# alignment->inference wiring: the batch path must feed get_feat the landmark-
+# aligned 112x112 BGR crop (pixels and channel order intact), one per valid
+# face, in input order. _norm_crop itself is proven bit-for-bit against
+# insightface in test_face_align_parity; here we assert the batch path applies
+# it to the right image + landmarks and passes the result through unaltered (no
+# stray colour convert / resize) — wiring coverage layered on a verified
+# primitive, not a tautology.
+
+
+def _det_img(seed, w=640, h=480):
+    """Deterministic BGR image so a failing crop assertion is reproducible."""
+    return np.random.default_rng(seed).integers(0, 256, (h, w, 3), dtype=np.uint8)
+
+
+def test_batch_feeds_aligned_crop_to_get_feat(mock_model):
+    img = _det_img(7)
+    faces = [_face_with_landmarks(_LANDMARKS)]
+    with patch("src.models.face_embed.get_recognition_model", return_value=mock_model):
+        get_face_embeddings_batch(img, faces)
+
+    (sent,), _ = mock_model.get_feat.call_args
+    assert isinstance(sent, list) and len(sent) == 1
+    crop = sent[0]
+    # Independent of _norm_crop: the contract get_feat expects.
+    assert crop.shape == (ARCFACE_INPUT_SIZE, ARCFACE_INPUT_SIZE, 3)
+    assert crop.dtype == np.uint8
+    # Exact aligned content, against the insightface-verified primitive.
+    expected = _norm_crop(img, np.array(_LANDMARKS, dtype=np.float32), ARCFACE_INPUT_SIZE)
+    np.testing.assert_array_equal(crop, expected)
+
+
+def test_batch_crops_match_per_face_alignment_in_order(mock_model):
+    """Each valid face's aligned crop is fed in input order — no batch reshuffle."""
+    img = _det_img(11)
+    faces = [_aligned_face(), _aligned_face(dx=40, dy=10), _aligned_face(dx=80, dy=20)]
+    with patch("src.models.face_embed.get_recognition_model", return_value=mock_model):
+        get_face_embeddings_batch(img, faces)
+
+    (sent,), _ = mock_model.get_feat.call_args
+    assert len(sent) == 3
+    for face, crop in zip(faces, sent):
+        kps = np.array(face["landmarks"], dtype=np.float32)
+        np.testing.assert_array_equal(crop, _norm_crop(img, kps, ARCFACE_INPUT_SIZE))
+
+
+def test_batch_excludes_skipped_face_and_keeps_crop_mapping(mock_model):
+    """A landmark-less face is dropped from the batch, and the valid crops still
+    map correctly past the gap (sent[1] is face[2]'s crop, not face[1]'s)."""
+    img = _det_img(13)
+    faces = [
+        _aligned_face(),  # valid -> sent[0]
+        _face_with_bbox(300, 100, 500, 300),  # no landmarks -> skipped
+        _aligned_face(dx=80, dy=20),  # valid -> sent[1]
+    ]
+    with patch("src.models.face_embed.get_recognition_model", return_value=mock_model):
+        results = get_face_embeddings_batch(img, faces)
+
+    (sent,), _ = mock_model.get_feat.call_args
+    assert len(sent) == 2  # only the two landmarked faces reach inference
+    np.testing.assert_array_equal(sent[0], _norm_crop(img, np.array(faces[0]["landmarks"], np.float32), ARCFACE_INPUT_SIZE))
+    np.testing.assert_array_equal(sent[1], _norm_crop(img, np.array(faces[2]["landmarks"], np.float32), ARCFACE_INPUT_SIZE))
+    assert results[0] is not None and results[1] is None and results[2] is not None
 
 
 # --- Edge cases ---

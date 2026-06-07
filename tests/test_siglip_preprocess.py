@@ -6,11 +6,12 @@ transforms.py / clip{visual,textual} algorithms bit-for-bit.
 """
 
 import glob
+import io
 from pathlib import Path
 
 import numpy as np
 import pytest
-from PIL import Image
+from PIL import Image, ImageOps
 
 from src.models.immich_preprocess import (
     SIGLIP2_IMAGE_SIZE,
@@ -37,6 +38,27 @@ def _immich_image_ref(pil: Image.Image, size: int = 384, mean: float = 0.5, std:
 def _make_image(w: int, h: int) -> Image.Image:
     rng = np.random.RandomState(w * 7919 + h)
     return Image.fromarray(rng.randint(0, 256, (h, w, 3), dtype=np.uint8), "RGB")
+
+
+# Fixed per-mode seed offset so the random source image is reproducible (no
+# PYTHONHASHSEED dependence) — both the function and the reference convert the
+# SAME object, so the seed only matters for repeatable failures.
+_MODE_SEED = {"L": 1, "RGBA": 2, "CMYK": 3, "P": 4}
+
+
+def _make_image_mode(w: int, h: int, mode: str) -> Image.Image:
+    """A deterministic non-RGB PIL image in ``mode`` (L/RGBA/CMYK/P)."""
+    rng = np.random.RandomState(w * 7919 + h + _MODE_SEED[mode])
+    if mode == "L":
+        return Image.fromarray(rng.randint(0, 256, (h, w), dtype=np.uint8), "L")
+    if mode in ("RGBA", "CMYK"):
+        return Image.fromarray(rng.randint(0, 256, (h, w, 4), dtype=np.uint8), mode)
+    if mode == "P":
+        # Build from RGB so the palette is real; P->RGB then goes through the
+        # palette, which both sides resolve identically.
+        rgb = Image.fromarray(rng.randint(0, 256, (h, w, 3), dtype=np.uint8), "RGB")
+        return rgb.convert("P")
+    raise ValueError(f"unsupported mode {mode}")
 
 
 # --------------------------------------------------------------------------- #
@@ -91,6 +113,58 @@ def test_image_is_crop_not_squash():
         0,
     ).transpose(0, 3, 1, 2)
     assert not np.allclose(crop, squash)
+
+
+# --------------------------------------------------------------------------- #
+# non-RGB inputs — convert("RGB") must run and stay bit-for-bit with Immich
+# --------------------------------------------------------------------------- #
+# Immich's transform opens every image and converts to RGB before resize; our
+# siglip_image_pixels does the same (image.convert("RGB") for any non-RGB mode).
+# Feed the SAME non-RGB image to both: since both apply PIL's identical
+# convert("RGB"), the pixels must match exactly. Pins the L/RGBA/CMYK/P convert
+# paths that the RGB-only tests above never exercised.
+@pytest.mark.parametrize("mode", ["L", "RGBA", "CMYK", "P"])
+@pytest.mark.parametrize("w,h", [(640, 480), (384, 384), (501, 333)])
+def test_image_pixels_non_rgb_match_immich(mode, w, h):
+    img = _make_image_mode(w, h, mode)
+    assert img.mode == mode  # the input really is non-RGB
+    got = siglip_image_pixels(img)
+    ref = _immich_image_ref(img)
+    assert got.shape == (1, 3, SIGLIP2_IMAGE_SIZE, SIGLIP2_IMAGE_SIZE)
+    assert got.dtype == np.float32
+    np.testing.assert_array_equal(got, ref)
+
+
+def test_grayscale_expands_to_three_equal_channels():
+    # L -> RGB replicates the single channel; resize/normalize are per-channel
+    # identical, so all three output planes must stay equal. Independent of the
+    # Immich reference.
+    px = siglip_image_pixels(_make_image_mode(640, 480, "L"))[0]  # (3, H, W)
+    np.testing.assert_array_equal(px[0], px[1])
+    np.testing.assert_array_equal(px[1], px[2])
+
+
+def test_exif_orientation_is_not_applied():
+    """Immich sends an already-oriented preview, so siglip_image_pixels must NOT
+    auto-transpose on the EXIF Orientation tag — doing so would double-rotate and
+    diverge from the server's index. Pin that orientation is ignored."""
+    base = _make_image(120, 200)  # portrait, non-square so a 90deg swap changes dims
+    exif = base.getexif()
+    exif[0x0112] = 6  # Orientation = "rotate 90 CW on display"
+    buf = io.BytesIO()
+    base.save(buf, format="JPEG", exif=exif, quality=95)
+    reloaded = Image.open(io.BytesIO(buf.getvalue()))
+    assert reloaded.getexif().get(0x0112) == 6  # tag survived the round-trip
+
+    got = siglip_image_pixels(reloaded)
+    # Processed as stored (orientation ignored), exactly like the independent
+    # Immich reference — which also does not consult EXIF.
+    np.testing.assert_array_equal(got, _immich_image_ref(reloaded))
+    # And it differs from the transposed image: proof we did not silently rotate.
+    transposed = ImageOps.exif_transpose(reloaded)
+    assert transposed is not None  # in_place defaults False -> returns a new image
+    assert transposed.size != reloaded.size  # 90deg swap changed (w, h)
+    assert not np.array_equal(got, siglip_image_pixels(transposed))
 
 
 # --------------------------------------------------------------------------- #

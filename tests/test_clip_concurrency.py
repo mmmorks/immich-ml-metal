@@ -9,6 +9,7 @@ instead of an AttributeError on None.img_processor / None.encode_image.
 
 import io
 import threading
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -313,3 +314,103 @@ def test_encode_text_siglip2_forces_eval_inside_lock():
 
     assert emb.shape == (1152,) and emb.dtype == np.float32
     assert record == [True], f"Metal eval must occur inside the lock, got {record}"
+
+
+# --- Concurrency determinism: N concurrent encodes == serial, per input --------
+#
+# The crash-safety tests above prove a mid-flight swap fails cleanly. These prove
+# the everyday case: many encodes running at once must each return the SAME vector
+# they would have serially — no request's preprocessed data leaking into another's
+# result. The fakes below make each embedding a deterministic function of the
+# input, so cross-talk shows up as a mismatched vector rather than a crash.
+
+
+def _solid_png(i: int) -> bytes:
+    """A distinct solid-colour PNG (lossless, so the fingerprint is exact)."""
+    buf = io.BytesIO()
+    Image.new("RGB", (40, 30), color=(20 * i + 5, 100, 150)).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _char_ids(text: str, ctx: int = 64) -> np.ndarray:
+    """Tokenizer stand-in: map text to distinct (1, ctx) int32 ids per string."""
+    ids = [ord(c) for c in text[:ctx]]
+    ids += [0] * (ctx - len(ids))
+    return np.array([ids], dtype=np.int32)
+
+
+class _DetMlxClipModel:
+    """mlx_clip-path fake whose output is a deterministic function of the input."""
+
+    def img_processor(self, images):
+        return float(np.asarray(images[0], dtype=np.float64).mean())
+
+    def tokenizer(self, texts):
+        return float(sum(ord(c) for c in texts[0]))
+
+    def model(self, pixel_values=None, input_ids=None):
+        fp = pixel_values if pixel_values is not None else input_ids
+        vec = np.array([fp, 1.0, 2.0, 3.0], dtype=np.float32)
+        return SimpleNamespace(image_embeds=[vec], text_embeds=[vec])
+
+
+class _DetSiglip2Model:
+    """SigLIP2-path fake: embedding derived from the real preprocessed input."""
+
+    def get_image_features(self, pixel_values=None):
+        fp = float(np.array(pixel_values).mean())
+        return [np.array([fp, 1.0, 2.0, 3.0], dtype=np.float32)]
+
+    def get_text_features(self, input_ids=None):
+        fp = float(np.array(input_ids).sum())
+        return [np.array([fp, 1.0, 2.0, 3.0], dtype=np.float32)]
+
+
+def _assert_concurrent_matches_serial(encode, inputs):
+    """Each concurrent encode must equal its serial baseline (per-input
+    determinism). First assert distinct inputs yield distinct embeddings, so a
+    constant-output regression can't make the determinism check vacuous."""
+    serial = [encode(x) for x in inputs]
+    for i in range(len(serial)):
+        for j in range(i + 1, len(serial)):
+            assert not np.array_equal(serial[i], serial[j]), "inputs not distinguishable — determinism check would be vacuous"
+
+    results: dict[int, np.ndarray] = {}
+    errors = []
+    barrier = threading.Barrier(len(inputs))
+
+    def worker(idx):
+        try:
+            barrier.wait(5)  # line threads up so the out-of-lock preprocessing overlaps
+            results[idx] = encode(inputs[idx])
+        except BaseException as e:
+            errors.append(e)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(len(inputs))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(10)
+
+    assert not any(t.is_alive() for t in threads), "a worker thread hung"
+    assert not errors, f"concurrent encode raised: {errors!r}"
+    for i in range(len(inputs)):
+        np.testing.assert_array_equal(results[i], serial[i], err_msg=f"input {i} got cross-talk under concurrency")
+
+
+def test_encode_image_mlx_clip_concurrent_matches_serial():
+    clip = _bare_clip(_DetMlxClipModel())
+    _assert_concurrent_matches_serial(clip.encode_image, [_solid_png(i) for i in range(8)])
+
+
+def test_encode_image_siglip2_concurrent_matches_serial():
+    """The production default path: real siglip_image_pixels preprocessing runs
+    concurrently outside the lock, then Metal eval is serialized."""
+    clip = _bare_siglip2(_DetSiglip2Model(), _FakeSiglip2Processor())
+    _assert_concurrent_matches_serial(clip.encode_image, [_solid_png(i) for i in range(8)])
+
+
+def test_encode_text_siglip2_concurrent_matches_serial():
+    clip = _bare_siglip2(_DetSiglip2Model(), _FakeSiglip2Processor())
+    clip._siglip_tokenizer = _char_ids  # distinct ids per text so outputs differ
+    _assert_concurrent_matches_serial(clip.encode_text, [f"a caption number {i}" for i in range(8)])
