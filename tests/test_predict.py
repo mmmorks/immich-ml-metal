@@ -1,9 +1,12 @@
 """Tests for the /predict endpoint — concurrent task execution, response format."""
+import asyncio
 import json
 
 import pytest
 import httpx
+from fastapi.responses import JSONResponse
 
+import src.main as main
 from src.main import app
 
 
@@ -215,3 +218,111 @@ async def test_predict_empty_tasks(client, test_image_bytes):
     data = resp.json()
     assert "imageHeight" in data
     assert "clip" not in data
+
+
+# --- Backpressure & timeout (ml-7j8.2) ---
+
+@pytest.fixture
+def reset_semaphore():
+    """Isolate semaphore mutations so a test's custom sizing doesn't leak."""
+    saved = main._request_semaphore
+    main._request_semaphore = None
+    try:
+        yield
+    finally:
+        main._request_semaphore = saved
+
+
+@pytest.mark.asyncio
+async def test_slow_processing_is_not_cancelled_by_timeout(
+    client, monkeypatch, reset_semaphore
+):
+    """Once a slot is acquired, processing must run to completion even if it
+    exceeds request_timeout. The timeout only bounds queue wait — wrapping the
+    uncancellable thread-pool work in it would orphan a pool thread.
+    """
+    monkeypatch.setattr(main.settings, "request_timeout", 0.3)
+
+    async def slow_process(entries, image, text):
+        # Far longer than request_timeout, but the semaphore was free so no
+        # queue wait occurred — this should NOT be cancelled.
+        await asyncio.sleep(1.0)
+        return JSONResponse({"slow": "done"})
+
+    monkeypatch.setattr(main, "_process_predict", slow_process)
+
+    resp = await client.post("/predict", data={"entries": _entries("clip")})
+    assert resp.status_code == 200
+    assert resp.json() == {"slow": "done"}
+
+
+@pytest.mark.asyncio
+async def test_queue_wait_times_out_with_503(client, monkeypatch, reset_semaphore):
+    """When all slots are busy, a request that waits longer than request_timeout
+    for a slot gets 503 — backpressure still works.
+    """
+    monkeypatch.setattr(main.settings, "max_concurrent_requests", 1)
+    monkeypatch.setattr(main.settings, "request_timeout", 0.3)
+
+    release = asyncio.Event()
+
+    async def blocking_process(entries, image, text):
+        await release.wait()
+        return JSONResponse({"ok": True})
+
+    monkeypatch.setattr(main, "_process_predict", blocking_process)
+
+    # First request grabs the only slot and parks inside processing.
+    holder = asyncio.create_task(
+        client.post("/predict", data={"entries": _entries("clip")})
+    )
+    await asyncio.sleep(0.05)  # let the holder acquire the slot
+
+    # Second request must wait for the slot and time out → 503.
+    resp = await client.post("/predict", data={"entries": _entries("clip")})
+    assert resp.status_code == 503
+    assert "overloaded" in resp.json()["detail"].lower()
+
+    # Let the holder finish cleanly.
+    release.set()
+    holder_resp = await holder
+    assert holder_resp.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_semaphore_not_leaked_on_queue_timeout(
+    client, monkeypatch, reset_semaphore
+):
+    """After a queue-wait timeout, the slot must be reusable — no permit leak."""
+    monkeypatch.setattr(main.settings, "max_concurrent_requests", 1)
+    monkeypatch.setattr(main.settings, "request_timeout", 0.3)
+
+    release = asyncio.Event()
+
+    async def blocking_process(entries, image, text):
+        await release.wait()
+        return JSONResponse({"ok": True})
+
+    monkeypatch.setattr(main, "_process_predict", blocking_process)
+
+    holder = asyncio.create_task(
+        client.post("/predict", data={"entries": _entries("clip")})
+    )
+    await asyncio.sleep(0.05)
+
+    # This one times out waiting for the slot.
+    timed_out = await client.post("/predict", data={"entries": _entries("clip")})
+    assert timed_out.status_code == 503
+
+    # Release the holder; the slot must be fully available again.
+    release.set()
+    assert (await holder).status_code == 200
+
+    # A fresh request now sails through — proving the permit wasn't leaked.
+    monkeypatch.setattr(main, "_process_predict", _passthrough_process)
+    resp = await client.post("/predict", data={"entries": _entries("clip")})
+    assert resp.status_code == 200
+
+
+async def _passthrough_process(entries, image, text):
+    return JSONResponse({"ok": True})

@@ -450,18 +450,33 @@ async def predict(
     Returns:
         JSONResponse with inference results
     """
-    # Apply backpressure via semaphore
+    # Apply backpressure via semaphore. The timeout bounds only the time spent
+    # WAITING for a slot — not the inference itself. _process_predict dispatches
+    # to _inference_pool via run_in_executor, which cannot be cancelled: once a
+    # thread starts inference it runs to completion. Wrapping the processing in a
+    # timeout would just abandon nearly-finished work while the pool thread keeps
+    # running, orphaning a slot and cascading timeouts under sustained overload
+    # (ml-7j8.2). So we time out the acquire, then run to completion uncancelled.
     semaphore = get_request_semaphore()
+    acquired = False
     try:
-        # Use timeout to avoid indefinite queuing
         async with asyncio.timeout(settings.request_timeout):
-            async with semaphore:
-                return await _process_predict(entries, image, text)
+            await semaphore.acquire()
+            acquired = True
     except asyncio.TimeoutError:
+        # Defensive: if the timeout fired exactly as acquire() succeeded, hand
+        # the permit back so a boundary race can't leak a slot.
+        if acquired:
+            semaphore.release()
         raise HTTPException(
             status_code=503,
             detail="Service overloaded, request timed out waiting in queue",
         )
+
+    try:
+        return await _process_predict(entries, image, text)
+    finally:
+        semaphore.release()
 
 
 async def _process_predict(

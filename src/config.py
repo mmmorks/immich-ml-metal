@@ -48,7 +48,7 @@ class Settings:
     
     # Resource limits
     max_image_size: int = 50 * 1024 * 1024  # 50MB max upload
-    request_timeout: int = 120  # 2 minutes max for ML inference
+    request_timeout: int = 120  # max seconds a request waits for a free slot (queue backpressure); does not cap in-flight inference
     
     # Logging settings
     log_level: LogLevel = "INFO"
