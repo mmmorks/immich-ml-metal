@@ -418,9 +418,7 @@ def evaluate(samples, app, iou: float, nose_strategy: str, labelled: bool) -> St
         # THE preserve test: fork-detected queries against the stored upstream index.
         cross_acc = top1_accuracy(F, lab, img_id, U, lab, img_id)
 
-    return StrategyResult(
-        drift, n_up, n_fork, n_matched, n_up_only, n_fork_only, n_fork_minscore, up_acc, fk_acc, cross_acc
-    )
+    return StrategyResult(drift, n_up, n_fork, n_matched, n_up_only, n_fork_only, n_fork_minscore, up_acc, fk_acc, cross_acc)
 
 
 # --------------------------------------------------------------------------- #
@@ -441,8 +439,7 @@ def main() -> int:
         "--nose",
         choices=["tip", "center", "both"],
         default="tip",
-        help="fork nose-anchor strategy: 'tip' (production, last contour point), "
-        "'center' (candidate, contour centroid), or 'both' to compare drift (default: tip)",
+        help="fork nose-anchor strategy: 'tip' (production, last contour point), 'center' (candidate, contour centroid), or 'both' to compare drift (default: tip)",
     )
     args = ap.parse_args()
 
@@ -499,10 +496,7 @@ def main() -> int:
         emit()
         emit("### Alignment-drift cosine (matched faces, identical ArcFace)")
         emit(f"  n={len(res.drift)}")
-        emit(
-            f"  min={d['min']:.4f}  p1={d['p1']:.4f}  p5={d['p5']:.4f}  "
-            f"median={d['median']:.4f}  mean={d['mean']:.4f}  max={d['max']:.4f}"
-        )
+        emit(f"  min={d['min']:.4f}  p1={d['p1']:.4f}  p5={d['p5']:.4f}  median={d['median']:.4f}  mean={d['mean']:.4f}  max={d['max']:.4f}")
         emit(f"  frac >= 0.90: {d['frac_ge_090']:.3f}   frac >= 0.95: {d['frac_ge_095']:.3f}")
         emit()
         emit("### Top-1 identity agreement")

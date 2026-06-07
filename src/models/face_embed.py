@@ -37,8 +37,7 @@ _inference_lock = threading.Lock()
 # estimate, so the affine matrix — and thus the aligned crop — is bit-identical
 # to insightface's on the success path (verified to 0 ULP; see test_face_align_parity).
 _ARCFACE_DST = np.array(
-    [[38.2946, 51.6963], [73.5318, 51.5014], [56.0252, 71.7366],
-     [41.5493, 92.3655], [70.7299, 92.2041]],
+    [[38.2946, 51.6963], [73.5318, 51.5014], [56.0252, 71.7366], [41.5493, 92.3655], [70.7299, 92.2041]],
     dtype=np.float32,
 )
 
@@ -378,9 +377,7 @@ def get_face_embeddings_batch(img_bgr: np.ndarray, faces: list[dict], model_name
     for face in faces:
         if "landmarks" not in face:
             logger.warning(
-                "Face %s has no landmarks (Vision could not recover all 5 points); "
-                "skipping — not embedded, to avoid a non-aligned vector polluting the "
-                "landmark-aligned face index",
+                "Face %s has no landmarks (Vision could not recover all 5 points); skipping — not embedded, to avoid a non-aligned vector polluting the landmark-aligned face index",
                 face.get("boundingBox"),
             )
             aligned.append(None)

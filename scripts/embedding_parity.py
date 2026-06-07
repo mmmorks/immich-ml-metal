@@ -232,10 +232,7 @@ def embed_openclip(images: list[tuple[str, bytes]], queries: list[str], device: 
         import open_clip
         import torch
     except ImportError as e:
-        raise SystemExit(
-            "The 'openclip' diagnostic needs open-clip-torch (optional). "
-            "Install it to use this reference: pip install open-clip-torch"
-        ) from e
+        raise SystemExit("The 'openclip' diagnostic needs open-clip-torch (optional). Install it to use this reference: pip install open-clip-torch") from e
 
     model, _, preprocess = open_clip.create_model_and_transforms(OPENCLIP_ARCH, pretrained=OPENCLIP_PRETRAINED)
     tokenizer = open_clip.get_tokenizer(OPENCLIP_ARCH)

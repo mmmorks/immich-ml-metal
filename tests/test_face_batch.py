@@ -154,9 +154,7 @@ def test_face_without_landmarks_is_skipped(mock_model, caplog):
 
     img = _fake_img()
     faces = [_face_with_bbox(100, 100, 200, 200)]  # no landmarks
-    with caplog.at_level(logging.WARNING, logger="src.models.face_embed"), patch(
-        "src.models.face_embed.get_recognition_model", return_value=mock_model
-    ):
+    with caplog.at_level(logging.WARNING, logger="src.models.face_embed"), patch("src.models.face_embed.get_recognition_model", return_value=mock_model):
         results = get_face_embeddings_batch(img, faces)
     assert len(results) == 1
     assert results[0] is None
