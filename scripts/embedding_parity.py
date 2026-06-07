@@ -53,6 +53,7 @@ import io
 import sys
 import time
 import urllib.request
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -366,7 +367,13 @@ def retrieval_agreement(mlx_img, mlx_txt, ref_img, ref_txt) -> dict:
     ref_top = np.argmax(ref_sim, axis=1)
     top1_agree = float(np.mean(mlx_top == ref_top))
     # Spearman-ish: correlation of the flattened similarity matrices.
-    matrix_corr = float(np.corrcoef(mlx_sim.ravel(), ref_sim.ravel())[0, 1])
+    # A single image + single query yields a one-element flattened matrix, whose
+    # corrcoef is a legitimate NaN (zero variance / DoF <= 0). Suppress the numpy
+    # RuntimeWarnings (DoF, divide-by-zero, invalid) for that expected edge case
+    # at the call site so runtime logs stay clean too — NaN is still returned.
+    with warnings.catch_warnings(), np.errstate(invalid="ignore", divide="ignore"):
+        warnings.simplefilter("ignore", RuntimeWarning)
+        matrix_corr = float(np.corrcoef(mlx_sim.ravel(), ref_sim.ravel())[0, 1])
     return {"top1_agreement": top1_agree, "matrix_corr": matrix_corr}
 
 
