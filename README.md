@@ -188,6 +188,44 @@ Any local weights directory name **must** contain a `patchNN-NNN` token (e.g.
 `patch16-384`), because the mlx-embeddings loader regex-parses the patch size
 from the path; the convert script enforces this.
 
+**Quantization — why the default stays fp16.** We evaluated 8-bit and 4-bit
+weight quantization for speed/memory vs accuracy
+(`scripts/quantization_eval.py`, 12 photos × 12 queries, cosine vs the fp16
+convert). The decision: **keep fp16; offer 8-bit text-only as an opt-in for
+memory-constrained installs.** The numbers:
+
+| precision | disk | peak mem | image cos | text cos | top-1 retrieval | verdict |
+|---|---|---|---|---|---|---|
+| fp16 (default) | 2.12 GiB | 2.63 GiB | — | — | — | baseline |
+| 8-bit text-only | 1.62 GiB | 2.14 GiB | 1.0000 | 0.9999 | 1.000 | near-lossless opt-in |
+| 4-bit text-only | 1.35 GiB | 1.87 GiB | 1.0000 | 0.9447 | **0.750** | rejected (search rankings drift) |
+| 8/4-bit incl. vision | — | — | — | — | — | **unsupported** by mlx-embeddings 0.1.0 |
+
+Two findings drive this:
+
+- **The vision tower can't be quantized** on mlx-embeddings 0.1.0: its SigLIP
+  `MultiheadAttentionPoolingHead` indexes a raw `in_proj.weight`, which is
+  invalid for a `QuantizedLinear`, so a vision-quantized model converts but
+  crashes at image-encode time. Every *runnable* variant is therefore
+  text-tower-only — image embeddings stay bit-identical to fp16 (`1.0000`), and
+  image-encode latency is unchanged. Since smart-search indexing is image-bound,
+  quantization buys no speed there.
+- **8-bit text-only is safe; 4-bit is not.** 8-bit leaves text-query embeddings
+  and retrieval rankings effectively unchanged (~19% lower peak memory, ~24%
+  smaller on disk). 4-bit drops text cosine to `0.9447` and flips 1 in 4 query
+  top-results — unacceptable for search quality.
+
+To use the 8-bit text-only weights (e.g. on a memory-tight machine), convert
+with quantization and point the accelerator at the result:
+
+```bash
+.venv/bin/python scripts/quantization_eval.py --configs 8bit-textonly --keep
+export ML_SIGLIP2_MLX_PATH=$PWD/models/quant_eval/siglip2-so400m-patch16-384-8bit-textonly
+```
+
+Revisit a true default change once mlx-embeddings can quantize the SigLIP vision
+attention (that's where the real memory/latency win for an image workload lives).
+
 ### The open_clip fallback
 
 The open_clip + PyTorch/MPS path is **kept** as a best-effort safety net. It
