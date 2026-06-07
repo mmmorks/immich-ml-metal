@@ -27,7 +27,10 @@ import string
 import numpy as np
 from PIL import Image
 
-# SigLIP2 SO400M patch16-384 fixed-res preprocessing constants.
+# SigLIP2 SO400M patch16-384 fixed-res preprocessing constants. These are
+# specific to that one variant — image size, normalization, and context length
+# differ per SigLIP2 checkpoint, so they MUST be revisited (ideally keyed off the
+# model name) if clip.py's MLX_EMBEDDINGS_MAP gains another SigLIP variant.
 SIGLIP2_IMAGE_SIZE = 384
 SIGLIP2_MEAN = (0.5, 0.5, 0.5)
 SIGLIP2_STD = (0.5, 0.5, 0.5)

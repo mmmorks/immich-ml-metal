@@ -6,7 +6,6 @@ Thread-safe for both loading and inference.
 """
 
 import mlx.core as mx
-import mlx.nn as nn
 import numpy as np
 from PIL import Image
 from pathlib import Path
@@ -418,7 +417,11 @@ class MLXClip:
             f"Loading SigLIP2 via mlx-embeddings: {self.model_name} -> "
             f"{path_or_repo} (source={source})"
         )
-        self._model, self._processor = load(path_or_repo)
+        # load() returns (model, SiglipProcessor), but the SigLIP2 paths
+        # preprocess via src.models.immich_preprocess (siglip_image_pixels +
+        # SiglipTextTokenizer, see ml-ycd.4), so the processor is unused here —
+        # discard it rather than storing a dead reference.
+        self._model, _ = load(path_or_repo)
         self._repo_id = path_or_repo
 
         # Immich-faithful text tokenizer (ml-ycd.4): the standard Immich server

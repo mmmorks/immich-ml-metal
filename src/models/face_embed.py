@@ -67,8 +67,6 @@ def _find_recognition_model(model_dir: Path) -> Optional[Path]:
     Returns:
         Path to the recognition model, or None if not found.
     """
-    import onnxruntime as ort
-
     onnx_files = list(model_dir.glob("*.onnx"))
     if not onnx_files:
         return None

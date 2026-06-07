@@ -12,16 +12,25 @@ _VALID_LOG_LEVELS: frozenset[str] = frozenset(
 )
 
 
+# Captures an invalid ML_LOG_LEVEL so configure_logging() can warn about it
+# AFTER basicConfig runs. Settings.from_env() executes at module import (well
+# before main.py calls configure_logging), so warning here would emit through an
+# unconfigured root logger and print unformatted.
+_invalid_log_level: str | None = None
+
+
 def _normalize_log_level(raw: str) -> LogLevel:
     """Coerce a user-supplied log level to a valid one, defaulting to INFO.
 
     An invalid ML_LOG_LEVEL would otherwise crash configure_logging() at
     getattr(logging, level) — guard it at the source so the stored value is
-    always a real logging level.
+    always a real logging level. The warning is deferred to configure_logging()
+    so it prints through the configured handler (see _invalid_log_level).
     """
+    global _invalid_log_level
     level = raw.upper()
     if level not in _VALID_LOG_LEVELS:
-        logging.warning("Invalid ML_LOG_LEVEL %r; falling back to INFO", raw)
+        _invalid_log_level = raw
         return "INFO"
     return level  # type: ignore[return-value]
 
@@ -99,6 +108,12 @@ class Settings:
             level=level,
             format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
         )
+        # Deferred from _normalize_log_level (runs at import, pre-basicConfig)
+        # so the warning prints through the formatter configured just above.
+        if _invalid_log_level is not None:
+            logging.getLogger(__name__).warning(
+                "Invalid ML_LOG_LEVEL %r; fell back to INFO", _invalid_log_level
+            )
 
 
 # Global settings instance
