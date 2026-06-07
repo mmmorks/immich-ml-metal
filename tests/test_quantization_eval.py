@@ -107,3 +107,78 @@ def test_ensure_convert_strips_skip_vision_on_reuse(tmp_path, monkeypatch):
     assert returned == out
     cfg_after = json.loads((out / "config.json").read_text())
     assert "skip_vision" not in cfg_after["vision_config"]
+
+
+# --------------------------------------------------------------------------- #
+# _strip_skip_vision_key: idempotency / no-op safety
+# --------------------------------------------------------------------------- #
+def test_strip_skip_vision_key_removes_then_is_idempotent(tmp_path):
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({
+        "vision_config": {"num_hidden_layers": 27, "skip_vision": True},
+        "text_config": {"hidden_size": 1152},
+    }))
+
+    mod._strip_skip_vision_key(tmp_path)
+    after_first = json.loads(cfg_path.read_text())
+    assert "skip_vision" not in after_first["vision_config"]
+    assert after_first["vision_config"]["num_hidden_layers"] == 27
+    assert after_first["text_config"] == {"hidden_size": 1152}  # untouched
+
+    # Second pass is a no-op and must not corrupt the now-clean config.
+    mod._strip_skip_vision_key(tmp_path)
+    assert json.loads(cfg_path.read_text()) == after_first
+
+
+def test_strip_skip_vision_key_noop_when_absent(tmp_path):
+    """A config that never carried skip_vision is left byte-for-byte unchanged
+    (no rewrite, no reformat)."""
+    cfg_path = tmp_path / "config.json"
+    raw = json.dumps({"vision_config": {"num_hidden_layers": 27}})
+    cfg_path.write_text(raw)
+    mod._strip_skip_vision_key(tmp_path)
+    assert cfg_path.read_text() == raw
+
+
+def test_strip_skip_vision_key_noop_when_no_vision_config(tmp_path):
+    cfg_path = tmp_path / "config.json"
+    raw = json.dumps({"text_config": {"hidden_size": 1152}})
+    cfg_path.write_text(raw)
+    mod._strip_skip_vision_key(tmp_path)  # must not raise on missing vision_config
+    assert cfg_path.read_text() == raw
+
+
+# --------------------------------------------------------------------------- #
+# dir_weight_bytes: sum *.safetensors only
+# --------------------------------------------------------------------------- #
+def test_dir_weight_bytes_sums_only_safetensors(tmp_path):
+    (tmp_path / "model-00001-of-00002.safetensors").write_bytes(b"\x00" * 100)
+    (tmp_path / "model-00002-of-00002.safetensors").write_bytes(b"\x00" * 50)
+    (tmp_path / "config.json").write_text("{}")  # ignored
+    (tmp_path / "tokenizer.json").write_text("{}")  # ignored
+    assert mod.dir_weight_bytes(tmp_path) == 150
+
+
+def test_dir_weight_bytes_empty_dir_is_zero(tmp_path):
+    assert mod.dir_weight_bytes(tmp_path) == 0
+
+
+# --------------------------------------------------------------------------- #
+# recommend: all-error candidate list (no usable variant)
+# --------------------------------------------------------------------------- #
+def test_recommend_all_candidates_errored_stays_fp16():
+    """When every quantized variant failed to convert/run, recommend must still
+    return fp16, list each as UNSUPPORTED, and never reach the pct_save math."""
+    base = _result("fp16")
+    errs = [
+        _result("4bit-textonly", error="vision quant unsupported"),
+        _result("8bit-textonly", error="convert exploded"),
+    ]
+    pick, rationale = mod.recommend([base, *errs])
+    assert pick == "fp16"
+    text = "\n".join(rationale)
+    assert "4bit-textonly: UNSUPPORTED — vision quant unsupported" in text
+    assert "8bit-textonly: UNSUPPORTED — convert exploded" in text
+    # The no-usable-variant branch, not the OPT-IN branch.
+    assert "no runnable quantized variant preserved retrieval" in text
+    assert "OPT-IN" not in text

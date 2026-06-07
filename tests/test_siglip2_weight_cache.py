@@ -86,6 +86,21 @@ def test_dir_without_tokenizer_rejected(tmp_path):
     assert siglip2_dir_is_complete(d) is False
 
 
+def test_sharded_weights_accepted(tmp_path):
+    """The completeness check globs ``*.safetensors`` precisely because a large
+    convert is written as ``model-00001-of-0000N.safetensors`` shards rather than
+    a single ``model.safetensors`` (see the docstring). A dir holding only shards
+    — no monolithic file — must still count as complete."""
+    d = tmp_path / "m"
+    d.mkdir()
+    (d / "config.json").write_text("{}")
+    (d / "tokenizer.json").write_text("{}")
+    (d / "model-00001-of-00002.safetensors").write_bytes(b"\x00")
+    (d / "model-00002-of-00002.safetensors").write_bytes(b"\x00")
+    assert not (d / "model.safetensors").exists()  # only shards, no monolith
+    assert siglip2_dir_is_complete(d) is True
+
+
 # --- resolve_siglip2_source --------------------------------------------------
 
 
