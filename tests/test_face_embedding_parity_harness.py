@@ -1,10 +1,8 @@
-"""Tests for scripts/face_embedding_parity.py.
+"""Harness math for scripts/face_embedding_parity.py (NOT model parity).
 
-Cover the pure, model-free pieces of the face-parity harness: IoU box overlap,
-the greedy cross-detector matcher (the bit that stops index-0-vs-index-0
-mismatches when SCRFD and Vision find different SETS of faces), the drift-cosine
-summary, and same-image-excluded top-1 retrieval. The heavyweight detectors
-(insightface, Apple Vision) are NOT imported — the script loads by path.
+Model-output parity is gated by tests/test_face_golden_parity.py against
+committed ONNX golden references; this file covers only the helper math
+(IoU, greedy_match, drift describe, same-image-excluded top-1).
 """
 
 import importlib.util

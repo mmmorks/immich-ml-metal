@@ -1,15 +1,8 @@
-"""Tests for scripts/embedding_parity.py.
+"""Harness math for scripts/embedding_parity.py (NOT model parity).
 
-A single failed sample-image download used to silently switch the WHOLE run to
-synthetic images (discarding already-fetched reals) with a zero exit, so the
-preserve-vs-reindex gate could pass on weak synthetic data. These cover:
-  * per-image download retry,
-  * fail-fast (SystemExit) when a download ultimately fails and synthetic isn't
-    explicitly allowed,
-  * loud, opt-in synthetic fallback that flags the run via ``used_synthetic``.
-
-The script is loaded by path (scripts/ is not a package), so these run without a
-heavyweight backend import.
+Model-output parity is gated by tests/test_clip_golden_parity.py against
+committed ONNX golden references; this file covers only the helper math
+(download retry, cosine, stats, retrieval_agreement).
 """
 
 import importlib.util
