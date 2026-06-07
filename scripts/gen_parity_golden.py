@@ -7,6 +7,7 @@ Run-once, locally (needs HF download + onnxruntime). Output is committed:
 Usage:
   .venv/bin/python scripts/gen_parity_golden.py --targets openai_clip siglip2 face
 """
+
 from __future__ import annotations
 
 import argparse
@@ -47,6 +48,17 @@ def _check_finite(name: str, arr: np.ndarray) -> None:
         raise SystemExit(f"{name}: zero-norm embedding in golden — refusing to commit.")
 
 
+def _resolve_sha(repo: str) -> str:
+    """Resolved commit SHA of an HF repo, recorded in the manifest so the golden
+    is reproducible against an exact revision."""
+    from huggingface_hub import HfApi
+
+    sha = HfApi().repo_info(repo).sha
+    if not sha:
+        raise SystemExit(f"could not resolve commit SHA for {repo}")
+    return sha
+
+
 def _write(stem: str, npz: dict, manifest: dict) -> None:
     GOLDEN.mkdir(parents=True, exist_ok=True)
     np.savez(GOLDEN / f"{stem}.npz", **npz)
@@ -68,7 +80,7 @@ def gen_openai_clip() -> None:
         {
             "model": OPENAI_MODEL,
             "onnx_repo": _ONNX_REPO[OPENAI_MODEL][0],
-            "onnx_repo_commit": "FILL_IN_resolved_sha",
+            "onnx_repo_commit": _resolve_sha(_ONNX_REPO[OPENAI_MODEL][0]),
             "onnxruntime_version": ort.__version__,
             "dim": int(img.shape[1]),
             "images": [n for n, _ in images],
@@ -80,7 +92,7 @@ def gen_openai_clip() -> None:
 
 
 def gen_siglip2() -> None:
-    from embedding_parity import ONNX_REPO_SIGLIP2, embed_onnx_siglip2
+    from embedding_parity import HF_REPO, ONNX_REPO_SIGLIP2, embed_onnx_siglip2
 
     images = _load_clip_images()
     queries = _load_queries()
@@ -93,7 +105,11 @@ def gen_siglip2() -> None:
         {
             "model": "ViT-SO400M-16-SigLIP2-384__webli",
             "onnx_repo": ONNX_REPO_SIGLIP2,
-            "onnx_repo_commit": "FILL_IN_resolved_sha",
+            "onnx_repo_commit": _resolve_sha(ONNX_REPO_SIGLIP2),
+            # The SigLIP2 tokenizer is fetched from a different repo than the ONNX
+            # weights (see embedding_parity.embed_onnx_siglip2); record it too.
+            "tokenizer_repo": HF_REPO,
+            "tokenizer_repo_commit": _resolve_sha(HF_REPO),
             "onnxruntime_version": ort.__version__,
             "dim": int(img.shape[1]),
             "images": [n for n, _ in images],
@@ -149,6 +165,8 @@ def gen_face() -> None:
     # Golden top-1 retrieval accuracy of the upstream embeddings against itself
     # (same-image excluded) — the test asserts MLX stays within 0.02 of this.
     golden_top1 = top1_accuracy(emb, labels, img_ids, emb, labels, img_ids)
+    if not np.isfinite(golden_top1):
+        raise SystemExit("face: golden top-1 is NaN (no cross-image candidates) — refusing to commit.")
     _write(
         "face",
         {

@@ -4,6 +4,7 @@
 NASA images are public domain. Each entry below is (filename, source_url).
 Verify each URL resolves and is PD before committing the output.
 """
+
 from __future__ import annotations
 
 import io
@@ -31,7 +32,7 @@ SOURCES: list[tuple[str, str]] = [
 
 def fetch_one(url: str) -> bytes:
     req = urllib.request.Request(url, headers={"User-Agent": "parity-fixtures/1.0"})
-    with urllib.request.urlopen(req, timeout=60) as resp:  # noqa: S310 (documented PD URLs)
+    with urllib.request.urlopen(req, timeout=60) as resp:
         return resp.read()
 
 

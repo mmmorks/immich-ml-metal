@@ -2,6 +2,8 @@
   "model": "ViT-SO400M-16-SigLIP2-384__webli",
   "onnx_repo": "immich-app/ViT-SO400M-16-SigLIP2-384__webli",
   "onnx_repo_commit": "19baa26af70bd3639ca0ca17d1560cb8056dd983",
+  "tokenizer_repo": "google/siglip2-so400m-patch16-384",
+  "tokenizer_repo_commit": "dd658faac399427308559e2c3ac1e99cbe43845d",
   "onnxruntime_version": "1.26.0",
   "dim": 1152,
   "images": [

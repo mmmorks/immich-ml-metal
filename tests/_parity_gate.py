@@ -4,6 +4,7 @@ Default: auto-detect (skip if deps or golden artifacts are unavailable).
 ML_RUN_PARITY=1: a missing prerequisite is a HARD FAILURE, so CI can guarantee
 the gate actually executed instead of silently skipping.
 """
+
 from __future__ import annotations
 
 import importlib.util

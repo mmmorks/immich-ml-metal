@@ -324,13 +324,15 @@ def upstream_embeddings(samples: list[Sample], det_size: int = 640) -> list[dict
         for f in upstream_faces(app, img_bgr):
             emb = embed(s.data, f["kps"])
             n = float(np.linalg.norm(emb))
-            records.append({
-                "img_id": img_id,
-                "name": s.name,
-                "label": s.label,
-                "bbox": tuple(float(v) for v in f["bbox"]),
-                "embedding": (emb / n if n > 0 else emb).astype(np.float32),
-            })
+            records.append(
+                {
+                    "img_id": img_id,
+                    "name": s.name,
+                    "label": s.label,
+                    "bbox": tuple(float(v) for v in f["bbox"]),
+                    "embedding": (emb / n if n > 0 else emb).astype(np.float32),
+                }
+            )
     return records
 
 

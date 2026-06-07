@@ -4,6 +4,7 @@ Skips unless prerequisites + golden artifacts are present (ML_RUN_PARITY=1 makes
 that a hard failure). The conftest forces STUB_MODE=true for hermetic unit tests;
 these tests load REAL models, so they run only on the opt-in/auto-detected path.
 """
+
 from __future__ import annotations
 
 import os
@@ -46,7 +47,7 @@ def test_clip_mlx_matches_onnx_golden(stem, model_name):
     # Real models required; opt out of the conftest's forced STUB_MODE.
     os.environ["STUB_MODE"] = "false"
 
-    gold = np.load(GOLDEN / f"{stem}.npz")
+    gold = np.load(GOLDEN / f"{stem}.npz", allow_pickle=False)
     g_img, g_txt = gold["image_embeds"], gold["text_embeds"]
     images, queries = _load_fixtures()
     assert len(images) == g_img.shape[0], "fixture/golden image count drift — regenerate golden"
@@ -60,7 +61,7 @@ def test_clip_mlx_matches_onnx_golden(stem, model_name):
         mlx_img = np.stack([model.encode_image(b) for _, b in images])
         mlx_txt = np.stack([model.encode_text(q) for q in queries])
         model.unload()
-    except Exception as e:  # noqa: BLE001 — translate to skip unless forced
+    except Exception as e:
         if forced:
             raise
         pytest.skip(f"MLX backend for {model_name} unavailable: {e}")

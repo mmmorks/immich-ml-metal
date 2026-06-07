@@ -237,9 +237,8 @@ def embed_onnx(
     Returns (image_embeds [N,D], text_embeds [M,D]), L2-normalized float32.
     """
     import onnxruntime as ort
-    from huggingface_hub import hf_hub_download
-
     import open_clip
+    from huggingface_hub import hf_hub_download
 
     from src.models.immich_preprocess import clean_text, siglip_image_pixels
 

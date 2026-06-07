@@ -1,4 +1,5 @@
 """Hermetic tests for the parity-gate skip/hard-fail decision logic."""
+
 import pytest
 
 from tests import _parity_gate as g

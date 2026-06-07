@@ -3,6 +3,7 @@
 Asserts alignment-drift median cosine >= 0.90 and top-1 retrieval drop <= 0.02.
 Apple Vision (the fork detector) is macOS-only; skips elsewhere.
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -65,7 +66,7 @@ def test_face_mlx_matches_onnx_golden():
                 mlx_bbox.append(f["bbox"])
                 mlx_labels.append(s.label)
                 mlx_keys.append(s.name)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         if forced:
             raise
         pytest.skip(f"MLX face pipeline unavailable: {e}")
@@ -80,7 +81,7 @@ def test_face_mlx_matches_onnx_golden():
     # excluded from the median. We DO require that every committed image yields
     # at least one matched face (the fork must still find each main subject).
     drift = []
-    matched_per_image: dict[str, int] = {k: 0 for k in g_keys}
+    matched_per_image: dict[str, int] = dict.fromkeys(g_keys, 0)
     fork_by_key: dict[str, list[int]] = {}
     for j, k in enumerate(mlx_keys):
         fork_by_key.setdefault(k, []).append(j)
@@ -95,15 +96,11 @@ def test_face_mlx_matches_onnx_golden():
             matched_per_image[key] += 1
 
     unmatched_images = [k for k, n in matched_per_image.items() if n == 0]
-    assert not unmatched_images, (
-        f"no fork face matched golden in image(s) {unmatched_images} — detection-set regression"
-    )
+    assert not unmatched_images, f"no fork face matched golden in image(s) {unmatched_images} — detection-set regression"
     assert drift, "no golden/fork face pairs matched by IoU"
 
     median_cos = float(np.median(drift))
-    assert median_cos >= MEDIAN_COS_MIN, (
-        f"median alignment-drift cosine {median_cos:.4f} < {MEDIAN_COS_MIN}; per-face={sorted(drift)}"
-    )
+    assert median_cos >= MEDIAN_COS_MIN, f"median alignment-drift cosine {median_cos:.4f} < {MEDIAN_COS_MIN}; per-face={sorted(drift)}"
 
     # Fork's own top-1 retrieval accuracy (same-image excluded), compared to the
     # golden's. Integer image ids derived from the stable keys.
@@ -111,6 +108,4 @@ def test_face_mlx_matches_onnx_golden():
     mlx_img_ids = [key_to_id[k] for k in mlx_keys]
     mlx_top1 = fep.top1_accuracy(mlx_emb_arr, mlx_labels, mlx_img_ids, mlx_emb_arr, mlx_labels, mlx_img_ids)
     drop = golden_top1 - float(mlx_top1)
-    assert drop <= TOP1_DROP_MAX, (
-        f"top-1 retrieval dropped {drop:.4f} (golden {golden_top1:.4f} -> mlx {mlx_top1:.4f}); max {TOP1_DROP_MAX}"
-    )
+    assert drop <= TOP1_DROP_MAX, f"top-1 retrieval dropped {drop:.4f} (golden {golden_top1:.4f} -> mlx {mlx_top1:.4f}); max {TOP1_DROP_MAX}"
