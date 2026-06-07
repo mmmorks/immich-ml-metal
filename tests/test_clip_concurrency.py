@@ -96,6 +96,39 @@ def test_encode_image_concurrent_unload_raises_clean_error():
     assert not isinstance(err, AttributeError), "swap-to-None leaked an AttributeError"
 
 
+def test_unload_serializes_against_inflight_inference():
+    """unload() must hold the inference lock around its teardown.
+
+    A concurrent model switch calls unload(), which frees the MLX buffer pool
+    via clear_cache(). If that runs while another thread is mid-eval under the
+    same metal_lock, the freed pool collides with the in-flight Metal work and
+    crashes the process. So unload() must block until the lock is free.
+    """
+    clip = _bare_clip(_FakeMLXModel())
+    lock = clip._inference_lock
+    unload_done = threading.Event()
+
+    # Stand in for an in-flight Metal eval holding the lock.
+    lock.acquire()
+
+    def unloader():
+        clip.unload()
+        unload_done.set()
+
+    t = threading.Thread(target=unloader)
+    t.start()
+    try:
+        # unload() must wait on the held lock — it cannot finish yet.
+        assert not unload_done.wait(0.5), "unload() did not wait for the inference lock"
+        lock.release()
+        assert unload_done.wait(5), "unload() never completed after the lock was released"
+    finally:
+        if lock.locked():
+            lock.release()
+        t.join(5)
+    assert not t.is_alive(), "unloader thread hung"
+
+
 def test_encode_image_unloaded_midflight_no_attributeerror():
     """Per-iteration guard: _model=None while _loaded stayed True -> RuntimeError."""
     clip = _bare_clip(_FakeMLXModel())

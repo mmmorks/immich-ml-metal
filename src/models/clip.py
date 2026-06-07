@@ -667,22 +667,32 @@ class MLXClip:
         return embedding.flatten().astype(np.float32)
 
     def unload(self):
-        """Unload model and free memory."""
+        """Unload model and free memory.
+
+        Held under ``_inference_lock`` (the global ``metal_lock``): a concurrent
+        model switch must not free the MLX buffer pool while another thread is
+        mid-eval inside the same lock. ``clear_cache()`` returning that pool to
+        the allocator during an in-flight Metal evaluation is exactly the
+        cross-stream collision the lock exists to prevent. Serializing here also
+        means ``self._model = None`` is published under the same lock that
+        ``_infer_with_swap_retry`` re-checks after acquiring it.
+        """
         logger.info(f"Unloading CLIP model: {self.model_name}")
-        self._model = None
-        self._processor = None
-        self._tokenizer = None
-        self._siglip_tokenizer = None
-        self._loaded = False
-        self._use_mlx_embeddings = False
+        with self._inference_lock:
+            self._model = None
+            self._processor = None
+            self._tokenizer = None
+            self._siglip_tokenizer = None
+            self._loaded = False
+            self._use_mlx_embeddings = False
 
-        gc.collect()
+            gc.collect()
 
-        try:
-            mx.clear_cache()
-        except AttributeError:
-            with contextlib.suppress(Exception):
-                mx.metal.clear_cache()
+            try:
+                mx.clear_cache()
+            except AttributeError:
+                with contextlib.suppress(Exception):
+                    mx.metal.clear_cache()
 
 
 # Global model cache with thread safety
