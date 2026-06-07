@@ -30,9 +30,9 @@ class Settings:
     face_min_score: float = 0.7
     
     # OCR settings
-    ocr_min_detection_score: float = 0.5
-    ocr_min_recognition_score: float = 0.5
-    ocr_max_resolution: int = 1024
+    # Detection/recognition minScore thresholds are supplied per-request by
+    # Immich (task_config["detection"]/["recognition"] options); they are not
+    # configured here. Only language correction is a local setting.
     ocr_use_language_correction: bool = True  # Disable for technical text/codes
     
     # Performance settings
