@@ -61,7 +61,13 @@ def normalized_bbox_to_box(
     ]
 
 
-def recognize_text(image_bytes: bytes, min_confidence: float = 0.0, use_language_correction: bool = True) -> dict:
+def recognize_text(
+    image_bytes: bytes,
+    min_confidence: float = 0.0,
+    use_language_correction: bool = True,
+    img_width: int | None = None,
+    img_height: int | None = None,
+) -> dict:
     """
     Perform OCR using Apple's Vision framework.
 
@@ -73,6 +79,9 @@ def recognize_text(image_bytes: bytes, min_confidence: float = 0.0, use_language
         min_confidence: Minimum confidence threshold (0.0 - 1.0)
         use_language_correction: Enable language correction (better for natural text,
                                  disable for technical text, serial numbers, codes)
+        img_width, img_height: Image dimensions the caller already knows (the
+            /predict handler opens the image once for these). When both are
+            given, the image is not opened again just to read its size.
 
     Returns:
         Dict matching Immich OCR response format:
@@ -83,16 +92,17 @@ def recognize_text(image_bytes: bytes, min_confidence: float = 0.0, use_language
             "textScore": [float, ...]
         }
     """
-    try:
-        pil_image = Image.open(io.BytesIO(image_bytes))
-        img_width, img_height = pil_image.size
-    except Exception as e:
-        # Hard decode failure — raise so the request fails (non-2xx) and Immich
-        # retries, instead of silently returning an empty result that marks the
-        # asset permanently processed and hides the failure. This is a
-        # hard error, distinct from a genuinely text-free image (empty success).
-        logger.error(f"Failed to load image for OCR: {e}")
-        raise
+    if img_width is None or img_height is None:
+        try:
+            pil_image = Image.open(io.BytesIO(image_bytes))
+            img_width, img_height = pil_image.size
+        except Exception as e:
+            # Hard decode failure — raise so the request fails (non-2xx) and Immich
+            # retries, instead of silently returning an empty result that marks the
+            # asset permanently processed and hides the failure. This is a
+            # hard error, distinct from a genuinely text-free image (empty success).
+            logger.error(f"Failed to load image for OCR: {e}")
+            raise
 
     # Use autorelease pool to prevent memory accumulation in long-running service
     pool = NSAutoreleasePool.alloc().init()

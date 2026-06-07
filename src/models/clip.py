@@ -538,7 +538,7 @@ class MLXClip:
         # returns or raises. Defensive guard.
         raise RuntimeError(f"CLIP {label} failed to produce an embedding")
 
-    def encode_image(self, image_bytes: bytes) -> np.ndarray:
+    def encode_image(self, image_bytes: bytes, image: "Image.Image | None" = None) -> np.ndarray:
         """
         Generate CLIP embedding for an image.
         Thread-safe — only GPU inference is serialized. Image decode and
@@ -547,12 +547,19 @@ class MLXClip:
         so a concurrent model switch cannot cause a mismatch. If the model
         was swapped mid-flight, preprocessing is re-run once against the
         new model.
+
+        ``image`` may be a PIL image the caller already opened (the /predict
+        handler opens the image once for its dimensions); when given, the raw
+        ``image_bytes`` are not decoded again.
         """
         if not self._loaded:
             raise RuntimeError("Model not loaded")
 
-        # Decode outside lock — this is CPU work, not GPU
-        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        # Decode outside lock — this is CPU work, not GPU. Reuse the caller's
+        # already-opened image instead of decoding the bytes a second time.
+        if image is None:
+            image = Image.open(io.BytesIO(image_bytes))
+        image = image.convert("RGB")
 
         if getattr(self, "_use_mlx_embeddings", False):
             return self._encode_image_siglip2(image)

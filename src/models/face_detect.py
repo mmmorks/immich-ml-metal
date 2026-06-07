@@ -77,7 +77,12 @@ def _vision_bbox_to_pixels(
     return {"x1": int(x1), "y1": int(y1), "x2": int(x2), "y2": int(y2)}
 
 
-def detect_faces(image_bytes: bytes, nose_strategy: str = DEFAULT_NOSE_STRATEGY) -> tuple[list[dict], int, int]:
+def detect_faces(
+    image_bytes: bytes,
+    nose_strategy: str = DEFAULT_NOSE_STRATEGY,
+    img_width: int | None = None,
+    img_height: int | None = None,
+) -> tuple[list[dict], int, int]:
     """
     Detect faces using Apple's Vision framework.
 
@@ -86,6 +91,9 @@ def detect_faces(image_bytes: bytes, nose_strategy: str = DEFAULT_NOSE_STRATEGY)
         nose_strategy: Nose-anchor reconstruction for the 5-point landmarks
             ("tip" = last nose-contour point, the production default; "center" =
             nose-contour centroid — the drift-evaluation variant).
+        img_width, img_height: Image dimensions the caller already knows (the
+            /predict handler opens the image once for these). When both are
+            given, the image is not opened again just to read its size.
 
     Returns:
         Tuple of (faces, image_width, image_height)
@@ -94,12 +102,13 @@ def detect_faces(image_bytes: bytes, nose_strategy: str = DEFAULT_NOSE_STRATEGY)
           - score: confidence score
           - landmarks: 5-point landmarks for alignment (if available)
     """
-    try:
-        pil_image = Image.open(io.BytesIO(image_bytes))
-        img_width, img_height = pil_image.size
-    except Exception as e:
-        logger.error(f"Failed to load image: {e}")
-        raise ValueError(f"Invalid image data: {e}") from e
+    if img_width is None or img_height is None:
+        try:
+            pil_image = Image.open(io.BytesIO(image_bytes))
+            img_width, img_height = pil_image.size
+        except Exception as e:
+            logger.error(f"Failed to load image: {e}")
+            raise ValueError(f"Invalid image data: {e}") from e
 
     # Use autorelease pool to prevent memory accumulation in long-running service
     pool = NSAutoreleasePool.alloc().init()
@@ -109,9 +118,7 @@ def detect_faces(image_bytes: bytes, nose_strategy: str = DEFAULT_NOSE_STRATEGY)
         del pool
 
 
-def _detect_faces_impl(
-    image_bytes: bytes, img_width: int, img_height: int, nose_strategy: str = DEFAULT_NOSE_STRATEGY
-) -> tuple[list[dict], int, int]:
+def _detect_faces_impl(image_bytes: bytes, img_width: int, img_height: int, nose_strategy: str = DEFAULT_NOSE_STRATEGY) -> tuple[list[dict], int, int]:
     """Internal face detection implementation (assumes autorelease pool is active)."""
     try:
         ns_data = NSData.dataWithBytes_length_(image_bytes, len(image_bytes))

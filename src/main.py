@@ -309,12 +309,24 @@ def get_clip(model_name: str = "ViT-B-32__openai"):
         raise
 
 
-async def run_face_recognition_async(image_bytes: bytes, min_score: float, model_name: str) -> list[dict]:
+async def run_face_recognition_async(
+    image_bytes: bytes,
+    min_score: float,
+    model_name: str,
+    img_width: int | None = None,
+    img_height: int | None = None,
+) -> list[dict]:
     """Run face detection and embedding generation (async wrapper)."""
-    return await _run_in_pool(_run_face_recognition_sync, image_bytes, min_score, model_name)
+    return await _run_in_pool(_run_face_recognition_sync, image_bytes, min_score, model_name, img_width, img_height)
 
 
-def _run_face_recognition_sync(image_bytes: bytes, min_score: float, model_name: str) -> list[dict]:
+def _run_face_recognition_sync(
+    image_bytes: bytes,
+    min_score: float,
+    model_name: str,
+    img_width: int | None = None,
+    img_height: int | None = None,
+) -> list[dict]:
     """Synchronous face recognition implementation.
 
     Decodes the image once, filters by min_score, then runs a single
@@ -328,7 +340,7 @@ def _run_face_recognition_sync(image_bytes: bytes, min_score: float, model_name:
     _mark_model_busy("face")
 
     try:
-        faces, _, _ = detect_faces(image_bytes)
+        faces, _, _ = detect_faces(image_bytes, img_width=img_width, img_height=img_height)
 
         # Filter by score first — no point aligning faces we'll discard
         scored_faces = [f for f in faces if f["score"] >= min_score]
@@ -580,7 +592,9 @@ async def _process_predict(
                 clip = get_clip(model_name)
                 assert clip is not None  # get_clip returns None only in STUB_MODE
                 try:
-                    embedding = await _run_in_pool(clip.encode_image, image_bytes)
+                    # Reuse the image already opened above for its dimensions
+                    # so CLIP doesn't decode the bytes a second time.
+                    embedding = await _run_in_pool(clip.encode_image, image_bytes, img)
                 finally:
                     _track_model_use("clip")
 
@@ -631,7 +645,15 @@ async def _process_predict(
                 }
             ]
         else:
-            faces = await run_face_recognition_async(image_bytes, min_score, model_name)
+            # Pass the dimensions already read above so face detection doesn't
+            # re-open the image just to measure it.
+            faces = await run_face_recognition_async(
+                image_bytes,
+                min_score,
+                model_name,
+                img_width=img.width if img else None,
+                img_height=img.height if img else None,
+            )
 
         logger.info("  faces: %d detected", len(faces))
         return ("facial-recognition", faces)
@@ -685,6 +707,9 @@ async def _process_predict(
                 image_bytes,
                 min_confidence=min_score,
                 use_language_correction=settings.ocr_use_language_correction,
+                # Reuse the dimensions read above so OCR doesn't re-open the image.
+                img_width=img.width if img else None,
+                img_height=img.height if img else None,
             )
         )
         return ("ocr", ocr_result)

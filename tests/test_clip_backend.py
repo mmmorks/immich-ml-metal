@@ -147,6 +147,24 @@ def test_siglip2_image_and_text_paths_independent():
         assert np.linalg.norm(emb) == pytest.approx(1.0, abs=1e-5)
 
 
+def test_encode_image_reuses_pre_decoded_image(monkeypatch):
+    """encode_image accepts an already-opened PIL image and does not re-open the
+    bytes — the /predict handler opens the image once for its dimensions and
+    hands the same object to CLIP, avoiding a redundant decode."""
+    clip = _bare_siglip2(_FakeSiglip2Model(np.ones(SIGLIP2_DIM, dtype=np.float32)))
+    image = Image.open(io.BytesIO(_red_jpeg()))
+
+    def _boom(*a, **k):
+        raise AssertionError("encode_image re-opened the image bytes")
+
+    monkeypatch.setattr(clip_module.Image, "open", _boom)
+
+    emb = clip.encode_image(b"unused-bytes", image)
+
+    assert emb.shape == (SIGLIP2_DIM,)
+    assert np.linalg.norm(emb) == pytest.approx(1.0, abs=1e-5)
+
+
 # --- Zero-embedding guard -----------------------------------------------------
 #
 # A genuinely zero pooled output (degenerate input / fp16 underflow) divided by
