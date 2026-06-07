@@ -270,8 +270,8 @@ setup is required and later loads are smaller/faster. Resolution order is:
 2. The local cache dir (`models/siglip2-so400m-patch16-384`, or
    `$ML_MODEL_CACHE_DIR/...`) if a complete convert exists there.
 3. **Pre-converted HF download** — snapshot a published fp16 repo
-   (`ML_SIGLIP2_HF_REPO`, default `mmmorks/siglip2-so400m-patch16-384`) into the
-   local cache dir, then load it (`source=cache`). Fast — no local convert.
+   (`ML_SIGLIP2_HF_REPO`, default `mlx-community/siglip2-so400m-patch16-384`) into
+   the local cache dir, then load it (`source=cache`). Fast — no local convert.
 4. **On-demand convert** — if the download is disabled/unavailable, a one-time
    fp16 convert runs into the local cache dir, then loads from it (`source=cache`).
 5. The HF repo bf16 safetensors — fallback if both of the above are off/fail.
@@ -280,9 +280,29 @@ Steps 3–4 each run once per machine, then every later load is `source=cache`.
 Control them with:
 
 - `ML_SIGLIP2_HF_REPO` — pre-converted fp16 repo to snapshot (default
-  `mmmorks/siglip2-so400m-patch16-384`); set empty to skip the download step.
+  `mlx-community/siglip2-so400m-patch16-384`); set empty to skip the download step.
 - `ML_SIGLIP2_AUTO_CONVERT=0` — skip the local convert (~2.2 GB write); load HF
   bf16 directly instead.
+
+**Pinned weights & integrity.** Model weights stay HuggingFace/InsightFace-hosted,
+but the sources we ship are pinned for reproducibility, so an upstream re-publish
+or a corrupted download can't silently shift embeddings (the pins live in
+`src/models/weight_pins.py`):
+
+- The default SigLIP2 download (step 3) is fetched at a fixed HF **revision**, and
+  the `model.safetensors` + `tokenizer.json` are verified against recorded
+  sha256s. A user-supplied `ML_SIGLIP2_HF_REPO` override is unvetted, so it is
+  fetched as-is (no pin, no checksum).
+- The ArcFace recognition model in the `buffalo_l` pack is verified against its
+  recorded sha256; a stale cached copy that mismatches is re-downloaded once.
+- In every case a **checksum mismatch is a hard failure** — never a silent
+  fallback to different weights.
+
+To intentionally adopt new weights, recompute the digests and update
+`weight_pins.py`: a HF LFS file's `oid` (from
+`https://huggingface.co/api/models/<repo>/tree/<rev>?recursive=true`) *is* its
+sha256, and `shasum -a 256 <file>` covers anything local (e.g. the unzipped
+`buffalo_l` pack).
 
 You can also pre-convert explicitly (e.g. ahead of first traffic, or to
 `--verify`), optionally publishing the result so other machines hit step 3:

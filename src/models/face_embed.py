@@ -13,6 +13,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from src.models import weight_pins
+
 logger = logging.getLogger(__name__)
 
 # Expected model characteristics for ArcFace recognition models
@@ -232,25 +234,52 @@ def _load_model(model_name: str):
         raise RuntimeError(f"Could not load {model_name} recognition model") from e
 
 
+def _recognition_model_checksum_ok(model_name: str, rec_model_path: Path) -> bool:
+    """Whether ``rec_model_path`` matches its pinned sha256.
+
+    Returns True when it matches *or* the pack/file is unpinned (unvetted packs
+    load unverified). Returns False on a mismatch, so the caller can refresh a
+    stale cached pack before deciding to hard-fail.
+    """
+    expected = weight_pins.ARCFACE_PINNED_SHA256.get(model_name, {}).get(rec_model_path.name)
+    if expected is None:
+        return True
+    try:
+        weight_pins.verify_sha256(rec_model_path, expected)
+        return True
+    except weight_pins.ChecksumMismatch as e:
+        logger.warning("Recognition model checksum mismatch: %s", e)
+        return False
+
+
 def _ensure_recognition_model_pack(model_name: str, download_model_pack) -> Path:
     """
     Ensure the face model pack exists and contains a valid ArcFace model.
 
-    If the cached pack is missing or does not contain a usable ArcFace model,
-    refresh it once from the upstream InsightFace release.
+    If the cached pack is missing, lacks a usable ArcFace model, or the
+    recognition model fails its pinned-sha256 verification, refresh it once from
+    the upstream InsightFace release. A freshly downloaded model that *still*
+    fails verification is a hard error (:class:`weight_pins.ChecksumMismatch`) —
+    we never load weights that would silently shift face embeddings.
     """
     insightface_root = Path.home() / ".insightface"
     model_dir = insightface_root / "models" / model_name
 
     rec_model_path = _find_recognition_model(model_dir) if model_dir.exists() else None
-    if rec_model_path is not None:
+    if rec_model_path is not None and _recognition_model_checksum_ok(model_name, rec_model_path):
         return rec_model_path
 
     if model_dir.exists():
-        logger.warning(
-            "No valid recognition model found in cached pack %s; refreshing download",
-            model_dir,
-        )
+        if rec_model_path is not None:
+            logger.warning(
+                "Cached %s recognition model failed checksum verification; refreshing download",
+                model_name,
+            )
+        else:
+            logger.warning(
+                "No valid recognition model found in cached pack %s; refreshing download",
+                model_dir,
+            )
         force = True
     else:
         logger.info(f"Downloading {model_name} model pack")
@@ -264,6 +293,11 @@ def _ensure_recognition_model_pack(model_name: str, download_model_pack) -> Path
 
     rec_model_path = _find_recognition_model(model_dir)
     if rec_model_path is not None:
+        # A fresh download that still mismatches its pin can't be recovered by
+        # retrying — surface it rather than indexing shifted/corrupted embeddings.
+        expected = weight_pins.ARCFACE_PINNED_SHA256.get(model_name, {}).get(rec_model_path.name)
+        if expected is not None:
+            weight_pins.verify_sha256(rec_model_path, expected)
         return rec_model_path
 
     available_files = [f.name for f in model_dir.glob("*.onnx")] if model_dir.exists() else []

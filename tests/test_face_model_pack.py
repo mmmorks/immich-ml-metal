@@ -1,7 +1,11 @@
+import hashlib
 import importlib.util
 from pathlib import Path
 
 import pytest
+
+from src.models import weight_pins
+from src.models.weight_pins import ChecksumMismatch
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "src" / "models" / "face_embed.py"
 SPEC = importlib.util.spec_from_file_location("face_embed_test_module", MODULE_PATH)
@@ -17,6 +21,15 @@ def _set_home(monkeypatch, tmp_path: Path):
 def _fake_find_model(model_dir: Path):
     model_file = model_dir / "model.onnx"
     return model_file if model_file.exists() else None
+
+
+def _pin_arcface(monkeypatch, model_name: str, filename: str, content: bytes):
+    """Point the ArcFace pin at the sha256 of ``content`` for the given pack/file."""
+    monkeypatch.setattr(
+        weight_pins,
+        "ARCFACE_PINNED_SHA256",
+        {model_name: {filename: hashlib.sha256(content).hexdigest()}},
+    )
 
 
 def test_uses_existing_valid_model_pack(monkeypatch, tmp_path):
@@ -94,3 +107,80 @@ def test_raises_if_redownload_still_missing_model(monkeypatch, tmp_path):
 
     with pytest.raises(FileNotFoundError):
         face_embed._ensure_recognition_model_pack("buffalo_l", fake_download)
+
+
+# --- checksum verification of the ArcFace recognition model ------------------
+#
+# The recognition model we load is pinned by sha256, so an upstream re-publish or
+# a corrupted/tampered download can't silently shift face embeddings. A stale
+# *cached* model that mismatches is refreshed once; a freshly downloaded model
+# that still mismatches is a hard failure.
+
+
+def test_verifies_cached_recognition_model_checksum(monkeypatch, tmp_path):
+    """A cached model whose sha256 matches the pin is used without downloading."""
+    _set_home(monkeypatch, tmp_path)
+    model_dir = tmp_path / ".insightface" / "models" / "buffalo_l"
+    model_dir.mkdir(parents=True)
+    model_file = model_dir / "model.onnx"
+    model_file.write_bytes(b"arcface-weights")
+    _pin_arcface(monkeypatch, "buffalo_l", "model.onnx", b"arcface-weights")
+    monkeypatch.setattr(face_embed, "_find_recognition_model", _fake_find_model)
+
+    def should_not_download(*args, **kwargs):
+        raise AssertionError("unexpected download")
+
+    result = face_embed._ensure_recognition_model_pack("buffalo_l", should_not_download)
+    assert result == model_file
+
+
+def test_cached_checksum_mismatch_triggers_refresh(monkeypatch, tmp_path):
+    """A cached model whose bytes don't match the pin is re-downloaded once."""
+    _set_home(monkeypatch, tmp_path)
+    model_dir = tmp_path / ".insightface" / "models" / "buffalo_l"
+    model_dir.mkdir(parents=True)
+    (model_dir / "model.onnx").write_bytes(b"stale-wrong-bytes")
+    _pin_arcface(monkeypatch, "buffalo_l", "model.onnx", b"correct-bytes")
+    monkeypatch.setattr(face_embed, "_find_recognition_model", _fake_find_model)
+
+    downloads = []
+
+    def fake_download(sub_dir, name, force, root):
+        downloads.append(force)
+        (model_dir / "model.onnx").write_bytes(b"correct-bytes")  # fresh, correct copy
+
+    result = face_embed._ensure_recognition_model_pack("buffalo_l", fake_download)
+    assert result == model_dir / "model.onnx"
+    assert downloads == [True], "a stale-checksum cache must force a refresh download"
+
+
+def test_fresh_download_checksum_mismatch_hard_fails(monkeypatch, tmp_path):
+    """If a freshly downloaded model still mismatches the pin, fail hard rather
+    than load weights that would shift embeddings."""
+    _set_home(monkeypatch, tmp_path)
+    model_dir = tmp_path / ".insightface" / "models" / "buffalo_l"
+    _pin_arcface(monkeypatch, "buffalo_l", "model.onnx", b"correct-bytes")
+    monkeypatch.setattr(face_embed, "_find_recognition_model", _fake_find_model)
+
+    def fake_download(sub_dir, name, force, root):
+        model_dir.mkdir(parents=True, exist_ok=True)
+        (model_dir / "model.onnx").write_bytes(b"TAMPERED-bytes")
+
+    with pytest.raises(ChecksumMismatch):
+        face_embed._ensure_recognition_model_pack("buffalo_l", fake_download)
+
+
+def test_unpinned_pack_skips_checksum(monkeypatch, tmp_path):
+    """A pack with no recorded pin is loaded without checksum verification."""
+    _set_home(monkeypatch, tmp_path)
+    model_dir = tmp_path / ".insightface" / "models" / "buffalo_l"
+    model_dir.mkdir(parents=True)
+    (model_dir / "model.onnx").write_bytes(b"whatever-unpinned")
+    monkeypatch.setattr(weight_pins, "ARCFACE_PINNED_SHA256", {})  # no pins at all
+    monkeypatch.setattr(face_embed, "_find_recognition_model", _fake_find_model)
+
+    def should_not_download(*args, **kwargs):
+        raise AssertionError("unexpected download")
+
+    result = face_embed._ensure_recognition_model_pack("buffalo_l", should_not_download)
+    assert result == model_dir / "model.onnx"

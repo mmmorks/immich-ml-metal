@@ -20,6 +20,7 @@ import mlx.core as mx
 import numpy as np
 from PIL import Image
 
+from src.models import weight_pins
 from src.models.clip_mlx import VendoredMlxClip
 from src.models.immich_preprocess import clean_text, siglip_image_pixels
 
@@ -229,16 +230,36 @@ def _siglip2_hf_repo() -> str:
     return os.getenv("ML_SIGLIP2_HF_REPO", "mlx-community/siglip2-so400m-patch16-384").strip()
 
 
+def _siglip2_pin_for_repo(hf_repo: str) -> tuple[str | None, dict[str, str]]:
+    """Pinned ``(revision, {file: sha256})`` for ``hf_repo``, or ``(None, {})``.
+
+    Only the vetted default repo is pinned: we recorded its revision + the
+    embedding-bearing files' digests, so an upstream re-publish or a corrupted
+    download can't silently shift embeddings. A user-supplied ``ML_SIGLIP2_HF_REPO``
+    override is unvetted — we have no digests for it — so it is fetched as-is.
+    """
+    if hf_repo == weight_pins.SIGLIP2_PINNED_REPO:
+        return weight_pins.SIGLIP2_PINNED_REVISION, weight_pins.SIGLIP2_PINNED_SHA256
+    return None, {}
+
+
 def _download_siglip2_repo(hf_repo: str, out: Path) -> bool:
     """Snapshot a pre-converted fp16 SigLIP2 repo into the local cache dir.
 
-    Returns True iff the snapshot leaves ``out`` a complete cache. Raises on a
-    download error so the caller can treat it as "not available" and fall through.
+    For the vetted default repo the snapshot is pinned to a fixed revision and the
+    downloaded weights are verified against their recorded sha256; a checksum
+    mismatch raises :class:`weight_pins.ChecksumMismatch` (a hard failure, never a
+    silent fallback to different weights). Returns True iff the snapshot leaves
+    ``out`` a complete cache. Raises on a download error so the caller can treat it
+    as "not available" and fall through.
     """
     from huggingface_hub import snapshot_download
 
+    revision, digests = _siglip2_pin_for_repo(hf_repo)
     out.mkdir(parents=True, exist_ok=True)
-    snapshot_download(repo_id=hf_repo, local_dir=str(out))
+    snapshot_download(repo_id=hf_repo, local_dir=str(out), revision=revision)
+    if digests:
+        weight_pins.verify_dir(out, digests)
     return siglip2_dir_is_complete(out)
 
 
@@ -288,6 +309,12 @@ def ensure_siglip2_source(repo_id: str) -> tuple[str, str]:
                 logger.info(f"Loaded pre-converted SigLIP2 from {hf_repo} -> {out}")
                 return str(out), "cache"
             logger.warning(f"Downloaded {hf_repo} but {out} is incomplete; trying local convert")
+        except weight_pins.ChecksumMismatch:
+            # The pinned weights are present but their bytes don't match — refuse
+            # to silently fall through to a local convert that would index shifted
+            # or corrupted embeddings. Surface it as a hard failure.
+            logger.error(f"Pinned SigLIP2 weights from {hf_repo} failed checksum verification", exc_info=True)
+            raise
         except Exception as e:
             logger.warning(
                 f"Pre-converted SigLIP2 download from {hf_repo} failed ({e}); trying local convert",

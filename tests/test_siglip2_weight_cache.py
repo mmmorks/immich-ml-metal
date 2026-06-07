@@ -13,17 +13,20 @@ resolution logic (no weights, no network):
     then a complete cache dir, then falls back to the HF repo id.
 """
 
+import hashlib
 import re
 from pathlib import Path
 
 import pytest
 
+from src.models import weight_pins
 from src.models.clip import (
     ensure_siglip2_source,
     resolve_siglip2_source,
     siglip2_cache_dir,
     siglip2_dir_is_complete,
 )
+from src.models.weight_pins import ChecksumMismatch
 
 REPO = "google/siglip2-so400m-patch16-384"
 
@@ -303,6 +306,9 @@ def test_ensure_default_hf_repo_is_ours(monkeypatch, tmp_path):
     monkeypatch.delenv("ML_SIGLIP2_HF_REPO", raising=False)
     monkeypatch.setenv("ML_MODEL_CACHE_DIR", str(tmp_path))
     snap, dl_calls = _fake_snapshot()
+    # The default repo is checksum-pinned, so point the pin at the bytes the
+    # fake snapshot writes (model.safetensors=b"\x00", tokenizer.json=b"{}").
+    _pin_to(monkeypatch, {"model.safetensors": b"\x00", "tokenizer.json": b"{}"})
     monkeypatch.setattr("huggingface_hub.snapshot_download", snap)
     path, source = ensure_siglip2_source(REPO)
     assert source == "cache"
@@ -352,3 +358,105 @@ def test_ensure_hf_bf16_when_download_fails_and_convert_disabled(hf_repo_set, mo
     path, source = ensure_siglip2_source(REPO)
     assert (source, path) == ("hf", REPO)
     assert len(dl_calls) == 1
+
+
+# --- ensure_siglip2_source: revision pinning + checksum verification ---------
+#
+# The default pre-converted repo is vetted: we pin its HF revision and verify the
+# downloaded weights' sha256 so an upstream re-publish or a corrupted download
+# can't silently shift embeddings. A user-supplied ML_SIGLIP2_HF_REPO override is
+# unvetted, so it is fetched as-is (no revision pin, no checksum).
+
+
+def _pin_to(monkeypatch, files: dict[str, bytes]):
+    """Point the SigLIP2 sha256 pin at the digests of ``files`` (so a fake
+    download of those exact bytes verifies)."""
+    monkeypatch.setattr(
+        weight_pins,
+        "SIGLIP2_PINNED_SHA256",
+        {name: hashlib.sha256(data).hexdigest() for name, data in files.items()},
+    )
+
+
+def _fake_snapshot_files(files: dict[str, bytes]):
+    """snapshot_download stub that records the revision kwarg and writes the given
+    ``{name: bytes}`` into local_dir."""
+    calls = []
+
+    def _snap(repo_id, local_dir, revision=None, **kwargs):
+        calls.append({"repo_id": repo_id, "local_dir": local_dir, "revision": revision})
+        p = Path(local_dir)
+        p.mkdir(parents=True, exist_ok=True)
+        for name, data in files.items():
+            (p / name).write_bytes(data)
+        return str(p)
+
+    return _snap, calls
+
+
+_GOOD_FILES = {
+    "config.json": b"{}",
+    "tokenizer.json": b"tokenizer-bytes",
+    "model.safetensors": b"weight-bytes",
+}
+
+
+def test_default_repo_download_pins_the_revision(monkeypatch, tmp_path):
+    monkeypatch.delenv("ML_SIGLIP2_MLX_PATH", raising=False)
+    monkeypatch.delenv("ML_SIGLIP2_HF_REPO", raising=False)  # -> default repo
+    monkeypatch.setenv("ML_MODEL_CACHE_DIR", str(tmp_path))
+    snap, calls = _fake_snapshot_files(_GOOD_FILES)
+    _pin_to(monkeypatch, {k: _GOOD_FILES[k] for k in ("model.safetensors", "tokenizer.json")})
+    monkeypatch.setattr("huggingface_hub.snapshot_download", snap)
+
+    path, source = ensure_siglip2_source(REPO)
+    assert source == "cache"
+    assert calls[0]["revision"] == weight_pins.SIGLIP2_PINNED_REVISION
+
+
+def test_custom_repo_download_is_not_revision_pinned(hf_repo_set, monkeypatch):
+    """An unvetted ML_SIGLIP2_HF_REPO override is fetched without a revision pin
+    or checksum — we have no digests for it."""
+    snap, calls = _fake_snapshot_files(_GOOD_FILES)
+    # Pin the (different) default-repo digests; they must be ignored for a custom repo.
+    monkeypatch.setattr(weight_pins, "SIGLIP2_PINNED_SHA256", {"model.safetensors": "0" * 64})
+    monkeypatch.setattr("huggingface_hub.snapshot_download", snap)
+
+    path, source = ensure_siglip2_source(REPO)
+    assert source == "cache"
+    assert calls[0]["repo_id"] == "acme/siglip2-so400m-patch16-384"
+    assert calls[0]["revision"] is None
+
+
+def test_default_repo_checksum_mismatch_hard_fails(monkeypatch, tmp_path):
+    """A digest mismatch must raise — never silently fall through to a local
+    convert, which would mask shifted/corrupted weights."""
+    monkeypatch.delenv("ML_SIGLIP2_MLX_PATH", raising=False)
+    monkeypatch.delenv("ML_SIGLIP2_HF_REPO", raising=False)
+    monkeypatch.setenv("ML_MODEL_CACHE_DIR", str(tmp_path))
+    snap, _ = _fake_snapshot_files(_GOOD_FILES)
+    monkeypatch.setattr(
+        weight_pins,
+        "SIGLIP2_PINNED_SHA256",
+        {"model.safetensors": "0" * 64, "tokenizer.json": "0" * 64},  # wrong on purpose
+    )
+    conv, conv_calls = _fake_convert()
+    monkeypatch.setattr("huggingface_hub.snapshot_download", snap)
+    _patch_convert(monkeypatch, conv)
+
+    with pytest.raises(ChecksumMismatch):
+        ensure_siglip2_source(REPO)
+    assert conv_calls == [], "a checksum mismatch must not fall back to local convert"
+
+
+def test_default_repo_checksum_pass_returns_cache(monkeypatch, tmp_path):
+    monkeypatch.delenv("ML_SIGLIP2_MLX_PATH", raising=False)
+    monkeypatch.delenv("ML_SIGLIP2_HF_REPO", raising=False)
+    monkeypatch.setenv("ML_MODEL_CACHE_DIR", str(tmp_path))
+    cache = tmp_path / "siglip2-so400m-patch16-384"
+    snap, _ = _fake_snapshot_files(_GOOD_FILES)
+    _pin_to(monkeypatch, {k: _GOOD_FILES[k] for k in ("model.safetensors", "tokenizer.json")})
+    monkeypatch.setattr("huggingface_hub.snapshot_download", snap)
+
+    path, source = ensure_siglip2_source(REPO)
+    assert (source, path) == ("cache", str(cache))
