@@ -349,13 +349,14 @@ async def test_predict_empty_tasks(client, test_image_bytes):
 
 @pytest.fixture
 def reset_semaphore():
-    """Isolate semaphore mutations so a test's custom sizing doesn't leak."""
-    saved = main._request_semaphore
-    main._request_semaphore = None
+    """Isolate semaphore mutations so a test's custom sizing doesn't leak, and
+    force a rebuild so monkeypatched per-task limits take effect."""
+    saved = main._task_semaphores
+    main._task_semaphores = None
     try:
         yield
     finally:
-        main._request_semaphore = saved
+        main._task_semaphores = saved
 
 
 @pytest.mark.asyncio
@@ -384,7 +385,7 @@ async def test_queue_wait_times_out_with_503(client, monkeypatch, reset_semaphor
     """When all slots are busy, a request that waits longer than request_timeout
     for a slot gets 503 — backpressure still works.
     """
-    monkeypatch.setattr(main.settings, "max_concurrent_requests", 1)
+    monkeypatch.setattr(main.settings, "clip_concurrency", 1)
     monkeypatch.setattr(main.settings, "request_timeout", 0.3)
 
     release = asyncio.Event()
@@ -413,7 +414,7 @@ async def test_queue_wait_times_out_with_503(client, monkeypatch, reset_semaphor
 @pytest.mark.asyncio
 async def test_semaphore_not_leaked_on_queue_timeout(client, monkeypatch, reset_semaphore):
     """After a queue-wait timeout, the slot must be reusable — no permit leak."""
-    monkeypatch.setattr(main.settings, "max_concurrent_requests", 1)
+    monkeypatch.setattr(main.settings, "clip_concurrency", 1)
     monkeypatch.setattr(main.settings, "request_timeout", 0.3)
 
     release = asyncio.Event()
@@ -439,6 +440,38 @@ async def test_semaphore_not_leaked_on_queue_timeout(client, monkeypatch, reset_
     monkeypatch.setattr(main, "_process_predict", _passthrough_process)
     resp = await client.post("/predict", data={"entries": _entries("clip")})
     assert resp.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_clip_saturation_does_not_block_faces(client, monkeypatch, reset_semaphore):
+    """Per-task admission: a CLIP request parked on the only CLIP slot must NOT
+    throttle face detection. CLIP (MLX, self-serializing) and faces (Vision,
+    parallel) hit independent compute units, so they get independent semaphores —
+    a single global gate used to make face detection queue behind CLIP.
+    """
+    monkeypatch.setattr(main.settings, "clip_concurrency", 1)
+    monkeypatch.setattr(main.settings, "request_timeout", 0.3)
+
+    release = asyncio.Event()
+
+    async def gated_process(entries, image, text):
+        # Only the CLIP request parks; a faces request must sail straight through.
+        if "clip" in json.loads(entries):
+            await release.wait()
+        return JSONResponse({"ok": True})
+
+    monkeypatch.setattr(main, "_process_predict", gated_process)
+
+    # CLIP request grabs the only CLIP slot and parks inside processing.
+    holder = asyncio.create_task(client.post("/predict", data={"entries": _entries("clip")}))
+    await asyncio.sleep(0.05)
+
+    # Face detection has its own slot — the parked CLIP must not block it.
+    faces = await client.post("/predict", data={"entries": _entries("facial-recognition")})
+    assert faces.status_code == 200
+
+    release.set()
+    assert (await holder).status_code == 200
 
 
 async def _passthrough_process(entries, image, text):

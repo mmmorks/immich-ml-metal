@@ -68,7 +68,19 @@ class Settings:
     # Performance settings
     use_coreml: bool = True
     use_ane: bool = True  # Apple Neural Engine
-    max_concurrent_requests: int = 4  # Queued requests before backpressure
+
+    # Per-task admission control. Each task type maps to a distinct compute path,
+    # so a single global cap throttled the genuinely-parallel Vision work (face
+    # detection, OCR) behind CLIP. Independent caps let each engine run at its
+    # real parallelism; total in-flight (and thus peak memory from concurrent
+    # decoded images) is the sum, so keep it modest:
+    #   clip  -> MLX GPU, serialized by metal_lock; >1 only pipelines preprocessing
+    #   faces -> Vision detect (parallel) + CoreML embed (serialized) — the one
+    #            that was being throttled; Immich dispatches faceDetection at 6
+    #   ocr   -> Vision, fully parallel; Immich dispatches ocr at 4
+    clip_concurrency: int = 2
+    face_concurrency: int = 6
+    ocr_concurrency: int = 4
 
     # Resource limits
     max_image_size: int = 50 * 1024 * 1024  # 50MB max upload
@@ -82,6 +94,16 @@ class Settings:
     # Should be False when service is network-accessible
     debug_mode: bool = False
 
+    @property
+    def task_concurrency(self) -> dict[str, int]:
+        """Per-task admission limits keyed by the task type sent in /predict
+        ``entries`` (matches the keys Immich uses)."""
+        return {
+            "clip": self.clip_concurrency,
+            "facial-recognition": self.face_concurrency,
+            "ocr": self.ocr_concurrency,
+        }
+
     @classmethod
     def from_env(cls) -> "Settings":
         """Load settings from environment variables."""
@@ -94,7 +116,9 @@ class Settings:
             ocr_use_language_correction=os.getenv("ML_OCR_LANGUAGE_CORRECTION", "true").lower() == "true",
             use_coreml=os.getenv("ML_USE_COREML", "true").lower() == "true",
             use_ane=os.getenv("ML_USE_ANE", "true").lower() == "true",
-            max_concurrent_requests=int(os.getenv("ML_MAX_CONCURRENT_REQUESTS", "4")),
+            clip_concurrency=int(os.getenv("ML_CLIP_CONCURRENCY", "2")),
+            face_concurrency=int(os.getenv("ML_FACE_CONCURRENCY", "6")),
+            ocr_concurrency=int(os.getenv("ML_OCR_CONCURRENCY", "4")),
             max_image_size=int(os.getenv("ML_MAX_IMAGE_SIZE", str(50 * 1024 * 1024))),
             request_timeout=int(os.getenv("ML_REQUEST_TIMEOUT", "120")),
             log_level=_normalize_log_level(os.getenv("ML_LOG_LEVEL", "INFO")),

@@ -135,9 +135,11 @@ Configure via environment variables or edit `src/config.py`:
 | `ML_OCR_LANGUAGE_CORRECTION` | `true` | Language correction for OCR (disable for codes/serials) |
 | `ML_USE_COREML` | `true` | Enable CoreML acceleration |
 | `ML_USE_ANE` | `true` | Enable Apple Neural Engine |
-| `ML_MAX_CONCURRENT_REQUESTS` | `4` | Max queued requests before backpressure |
+| `ML_CLIP_CONCURRENCY` | `2` | Max concurrent CLIP requests. CLIP serializes on the Metal GPU anyway, so >1 only overlaps image prep |
+| `ML_FACE_CONCURRENCY` | `6` | Max concurrent face-detection requests (Vision runs them in parallel) |
+| `ML_OCR_CONCURRENCY` | `4` | Max concurrent OCR requests (Vision runs them in parallel) |
 | `ML_MAX_IMAGE_SIZE` | `52428800` | Max upload size in bytes (50 MB); larger requests are rejected |
-| `ML_REQUEST_TIMEOUT` | `120` | Max seconds a request waits for a free slot (queue backpressure); does not cap in-flight inference |
+| `ML_REQUEST_TIMEOUT` | `120` | Max seconds a request waits for a free slot (per-task backpressure); does not cap in-flight inference |
 | `MODEL_UNLOAD_STRATEGY` | `pressure` | `pressure`: unload when RAM is low + idle. `timeout`: unload after idle timeout. `never`: keep loaded. |
 | `MODEL_IDLE_TIMEOUT` | `120` | Seconds before unloading idle models (only used with `timeout` strategy) |
 | `MODEL_MEMORY_FLOOR_MB` | `500` | Available RAM threshold that triggers model unloading (only used with `pressure` strategy) |

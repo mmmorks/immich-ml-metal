@@ -171,14 +171,12 @@ def _start_idle_monitor() -> None:
 # Dedicated thread pool for ML inference — reuses threads instead of
 # creating a new one per asyncio.to_thread() call.
 #
-# A single request fans out one pool job per task type (CLIP, facial-recognition,
-# OCR), so up to MAX_TASKS_PER_REQUEST jobs run concurrently for one request. The
-# request semaphore caps concurrent *requests* at max_concurrent_requests; size
-# the pool to their product so concurrent multi-task requests genuinely overlap
-# their independent compute units (GPU/ANE/CPU) instead of starving each other.
-MAX_TASKS_PER_REQUEST = 3
+# Admission is per task type (see get_task_semaphores), so the most pool jobs that
+# can be in flight at once is the sum of the per-task limits — one job per admitted
+# task. Size the pool to that sum so every admitted task gets a thread and they
+# genuinely overlap their independent compute units (GPU/ANE/CPU).
 _inference_pool = ThreadPoolExecutor(
-    max_workers=settings.max_concurrent_requests * MAX_TASKS_PER_REQUEST,
+    max_workers=sum(settings.task_concurrency.values()),
     thread_name_prefix="ml-inference",
 )
 
@@ -191,16 +189,22 @@ def _run_in_pool(fn: Callable[..., _T], *args) -> "asyncio.Future[_T]":
 if STUB_MODE:
     logger.warning("Running in STUB_MODE - returning fake data")
 
-# Semaphore for backpressure - limits queued requests
-_request_semaphore: asyncio.Semaphore | None = None
+# Per-task semaphores for backpressure. One global gate forced the genuinely
+# parallel Vision work (face detection, OCR) to queue behind self-serializing CLIP;
+# a semaphore per task type lets each compute unit run at its own limit. Lazily
+# built (asyncio primitives want a running loop) and keyed by the /predict task
+# type. Reset to None in tests to pick up monkeypatched limits.
+_task_semaphores: dict[str, asyncio.Semaphore] | None = None
 
 
-def get_request_semaphore() -> asyncio.Semaphore:
-    """Get or create the request semaphore (lazy init for async context)."""
-    global _request_semaphore
-    if _request_semaphore is None:
-        _request_semaphore = asyncio.Semaphore(settings.max_concurrent_requests)
-    return _request_semaphore
+def get_task_semaphores() -> dict[str, asyncio.Semaphore]:
+    """Get or create the per-task semaphore registry (lazy init for async context)."""
+    global _task_semaphores
+    if _task_semaphores is None:
+        _task_semaphores = {
+            name: asyncio.Semaphore(limit) for name, limit in settings.task_concurrency.items()
+        }
+    return _task_semaphores
 
 
 # Pydantic models for response validation
@@ -242,7 +246,7 @@ async def lifespan(app: FastAPI):
     logger.info(f"CLIP model: {settings.clip_model}")
     logger.info(f"Face model: {settings.face_model}")
     logger.info(f"Face min score: {settings.face_min_score}")
-    logger.info(f"Max concurrent requests: {settings.max_concurrent_requests}")
+    logger.info(f"Task concurrency: {settings.task_concurrency}")
     logger.info(f"Log level: {settings.log_level}")
 
     _start_idle_monitor()
@@ -493,24 +497,33 @@ async def predict(
     Returns:
         JSONResponse with inference results
     """
-    # Apply backpressure via semaphore. The timeout bounds only the time spent
-    # WAITING for a slot — not the inference itself. _process_predict dispatches
-    # to _inference_pool via run_in_executor, which cannot be cancelled: once a
-    # thread starts inference it runs to completion. Wrapping the processing in a
-    # timeout would just abandon nearly-finished work while the pool thread keeps
-    # running, orphaning a slot and cascading timeouts under sustained overload.
-    # So we time out the acquire, then run to completion uncancelled.
-    semaphore = get_request_semaphore()
-    acquired = False
+    # Apply backpressure with one semaphore per requested task type. The timeout
+    # bounds only the time spent WAITING for slots — not the inference itself.
+    # _process_predict dispatches to _inference_pool via run_in_executor, which
+    # cannot be cancelled: once a thread starts inference it runs to completion.
+    # Wrapping the processing in a timeout would just abandon nearly-finished work
+    # while the pool thread keeps running, orphaning a slot and cascading timeouts
+    # under sustained overload. So we time out the acquire, then run uncancelled.
+    #
+    # Parse leniently to find the requested task types; a malformed body holds no
+    # slots and falls through to _process_predict, which rejects it with 422.
+    # Acquire in a fixed (sorted) order so multi-task requests can't deadlock.
+    semaphores = get_task_semaphores()
+    try:
+        requested = sorted(t for t in json.loads(entries) if t in semaphores)
+    except (json.JSONDecodeError, TypeError, AttributeError):
+        requested = []
+
+    acquired: list[asyncio.Semaphore] = []
     try:
         async with asyncio.timeout(settings.request_timeout):
-            await semaphore.acquire()
-            acquired = True
+            for task_type in requested:
+                await semaphores[task_type].acquire()
+                acquired.append(semaphores[task_type])
     except TimeoutError:
-        # Defensive: if the timeout fired exactly as acquire() succeeded, hand
-        # the permit back so a boundary race can't leak a slot.
-        if acquired:
-            semaphore.release()
+        # Hand back whatever was acquired before the timeout so no slot leaks.
+        for sem in acquired:
+            sem.release()
         raise HTTPException(
             status_code=503,
             detail="Service overloaded, request timed out waiting in queue",
@@ -519,7 +532,8 @@ async def predict(
     try:
         return await _process_predict(entries, image, text)
     finally:
-        semaphore.release()
+        for sem in acquired:
+            sem.release()
 
 
 async def _process_predict(
