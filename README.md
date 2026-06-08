@@ -129,7 +129,6 @@ Configure via environment variables or edit `src/config.py`:
 |----------|---------|-------------|
 | `ML_HOST` | `0.0.0.0` | Bind address |
 | `ML_PORT` | `3003` | Port number (must match Immich config) |
-| `ML_MODELS_DIR` | `./models` | Model storage directory |
 | `ML_CLIP_MODEL` | `ViT-SO400M-16-SigLIP2-384__webli` | CLIP model name (fallback when a request omits one; SigLIP2 default needs no torch) |
 | `ML_FACE_MODEL` | `buffalo_l` | Face recognition model (buffalo_s/m/l) |
 | `ML_FACE_MIN_SCORE` | `0.7` | Face detection confidence threshold |
@@ -137,6 +136,8 @@ Configure via environment variables or edit `src/config.py`:
 | `ML_USE_COREML` | `true` | Enable CoreML acceleration |
 | `ML_USE_ANE` | `true` | Enable Apple Neural Engine |
 | `ML_MAX_CONCURRENT_REQUESTS` | `4` | Max queued requests before backpressure |
+| `ML_MAX_IMAGE_SIZE` | `52428800` | Max upload size in bytes (50 MB); larger requests are rejected |
+| `ML_REQUEST_TIMEOUT` | `120` | Max seconds a request waits for a free slot (queue backpressure); does not cap in-flight inference |
 | `MODEL_UNLOAD_STRATEGY` | `pressure` | `pressure`: unload when RAM is low + idle. `timeout`: unload after idle timeout. `never`: keep loaded. |
 | `MODEL_IDLE_TIMEOUT` | `120` | Seconds before unloading idle models (only used with `timeout` strategy) |
 | `MODEL_MEMORY_FLOOR_MB` | `500` | Available RAM threshold that triggers model unloading (only used with `pressure` strategy) |
