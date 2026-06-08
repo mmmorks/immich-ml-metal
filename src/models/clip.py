@@ -377,8 +377,11 @@ class MLXClip:
         self._siglip_tokenizer: Callable[[str], Any] | None = None
         self._loaded = False
         self._repo_id = MODEL_MAP.get(model_name, MODEL_MAP.get("default"))
-        # Use the global metal_lock — Vision framework also touches Metal
-        # and concurrent MLX + Vision Metal access crashes the process.
+        # Serialize CLIP through the shared metal_lock: MLX's Metal backend is
+        # single-thread-per-stream, so concurrent CLIP evals (and a CLIP eval
+        # racing unload()'s clear_cache) corrupt the command buffer. Not a
+        # CLIP-vs-Vision guard — Vision/CoreML are separately thread-safe. See
+        # gpu_lock for the full rationale.
         from ..gpu_lock import metal_lock
 
         self._inference_lock = metal_lock
@@ -600,9 +603,9 @@ class MLXClip:
         def run(model_ref, processed):
             output = model_ref.model(pixel_values=processed)
             embedding = output.image_embeds[0]
-            # Force Metal evaluation inside the lock — MLX arrays are lazy,
-            # and Metal work must complete before releasing the lock so
-            # Vision framework calls don't collide with in-flight Metal ops.
+            # Force Metal evaluation inside the lock — MLX arrays are lazy, and
+            # the eval must complete before the lock releases so the next CLIP op
+            # (or unload()'s clear_cache) can't race this stream's command buffer.
             if isinstance(embedding, mx.array):
                 embedding = np.array(embedding)
             return embedding
@@ -709,7 +712,7 @@ class MLXClip:
         model switch must not free the MLX buffer pool while another thread is
         mid-eval inside the same lock. ``clear_cache()`` returning that pool to
         the allocator during an in-flight Metal evaluation is exactly the
-        cross-stream collision the lock exists to prevent. Serializing here also
+        command-buffer collision the lock exists to prevent. Serializing here also
         means ``self._model = None`` is published under the same lock that
         ``_infer_with_swap_retry`` re-checks after acquiring it.
         """
