@@ -45,6 +45,11 @@ STUB_MODE = os.getenv("STUB_MODE", "false").lower() == "true"
 MODEL_UNLOAD_STRATEGY = os.getenv("MODEL_UNLOAD_STRATEGY", "pressure")
 MODEL_IDLE_TIMEOUT = int(os.getenv("MODEL_IDLE_TIMEOUT", "120"))
 MODEL_MEMORY_FLOOR_MB = int(os.getenv("MODEL_MEMORY_FLOOR_MB", "500"))
+# kern.memorystatus_vm_pressure_level at or above this means the OS is asking for
+# memory back (2=warn, 4=critical). Warn, not critical: on a machine that swaps
+# rather than stalling, critical may never be reached — warn was the level
+# observed throughout the 28-day 2.6 GB retention this threshold exists to end.
+_VM_PRESSURE_WARN = 2
 # Minimum idle time before a model is eligible for pressure-based unloading
 _PRESSURE_IDLE_MIN_SEC = 30
 _model_last_used: dict[str, float] = {}
@@ -75,8 +80,44 @@ def _mark_model_busy(model_type: str) -> None:
     _model_busy.add(model_type)
 
 
+def _vm_pressure_level() -> int | None:
+    """The kernel's own memory-pressure verdict: 1=normal, 2=warn, 4=critical.
+
+    This is the signal macOS itself uses to ask processes to free memory — the
+    same one ``DISPATCH_SOURCE_TYPE_MEMORYPRESSURE`` fires on. Returns None when
+    it cannot be read, so callers can fall back rather than read "unknown" as
+    "critical" and unload on every cycle.
+    """
+    try:
+        import subprocess
+
+        out = subprocess.check_output(["sysctl", "-n", "kern.memorystatus_vm_pressure_level"], timeout=5)
+        return int(out.decode().strip())
+    except Exception:
+        return None
+
+
 def _available_memory_mb() -> int:
-    """Check available memory (free + inactive pages) via vm_stat."""
+    """Memory available without swapping, in MB.
+
+    Asks the kernel FIRST, because the page-count arithmetic below cannot detect
+    the case this function exists to catch. `free + inactive` overstates
+    availability badly under real pressure: macOS keeps a large inactive list and
+    responds by compressing and swapping rather than draining it, so the figure
+    stays in the GBs while the machine thrashes.
+
+    Measured on a 24 GB host 2026-08-01: free+inactive reported 2452 MB — far
+    above the 500 MB floor, so an idle CLIP model held 2.6 GB of unified memory
+    for 28 days and never unloaded — while free was 68 MB, the compressor held
+    7.2 GB, and swap churned ~147 MB/s in BOTH directions. The kernel reported
+    pressure level 2 (warn) throughout. A LEVEL of free pages is the wrong
+    question; whether the OS is asking for memory back is the right one.
+
+    The page math is kept only as the fallback for when the sysctl is unreadable.
+    """
+    level = _vm_pressure_level()
+    if level is not None and level >= _VM_PRESSURE_WARN:
+        return 0
     try:
         import re
         import subprocess
