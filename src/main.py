@@ -242,9 +242,7 @@ def get_task_semaphores() -> dict[str, asyncio.Semaphore]:
     """Get or create the per-task semaphore registry (lazy init for async context)."""
     global _task_semaphores
     if _task_semaphores is None:
-        _task_semaphores = {
-            name: asyncio.Semaphore(limit) for name, limit in settings.task_concurrency.items()
-        }
+        _task_semaphores = {name: asyncio.Semaphore(limit) for name, limit in settings.task_concurrency.items()}
     return _task_semaphores
 
 
